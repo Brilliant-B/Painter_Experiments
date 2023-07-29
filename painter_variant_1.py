@@ -431,7 +431,6 @@ def painter_varient_patch16_win_dec64_8glb_sl1(**kwargs):
         **kwargs)
     return model
 
-
 def get_vit_lr_decay_rate(name, lr_decay_rate=1.0, num_layers=12):
     """
     Calculate lr decay rate for different ViT blocks.

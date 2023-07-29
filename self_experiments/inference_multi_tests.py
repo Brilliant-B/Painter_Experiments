@@ -214,14 +214,12 @@ def graphing(costs, prompts_choice, cr_depth_choice, xcr_depth_choice):
 def prompts_test(test_flop=False):
     args = get_args_parser()
     args = ddp_utils.init_distributed_mode(args)
-    
     print("WARM-UP started")
     args.xcr_depth = 4
     args.cr_depth = 12
     args.num_prompts = 3
     prompts_test_step(args, test_flop)
     print("WARM-UP finished")
-
     prompts_choice = range(1, 4) # range(1, 3)
     cr_depth_choice = range(6, 25, 2) # range(4, 25)
     xcr_depth_choice = range(25) # range(25)

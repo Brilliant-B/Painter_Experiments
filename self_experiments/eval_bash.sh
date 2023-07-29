@@ -17,6 +17,6 @@ python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=29
   self_experiments/inference_multi_tests.py \
   --model ${MODEL} --ckpt_path ${CKPT_PATH} --img_size ${SIZE}
 
-# postprocessing and eval
+# postprocessing and evaluation
 # python self_experiments/eval_multi_tests.py \
 #   --pred_dir ${DST_DIR}
