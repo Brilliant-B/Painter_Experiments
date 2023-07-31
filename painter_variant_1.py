@@ -232,7 +232,7 @@ class Painter_Varient(nn.Module):
             embed_dim=1024,
             depth=24,
             num_heads=16,
-            merge_idx=2,
+            merge_layer=3,
             num_prompts=1,
             cr_depth=12,
             xcr_depth=2,
@@ -269,12 +269,12 @@ class Painter_Varient(nn.Module):
         )
         self.patch_embed.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
         self.loss_func = loss_func
-        self.merge_idx = merge_idx
+        self.merge_layer= merge_layer
         self.encoder_sampling = set([5, 11, 17, 23])
         self.num_prompts = num_prompts
         self.cr_depth = cr_depth
         self.xcr_depth = xcr_depth
-        assert self.merge_idx < self.cr_depth <= self.cr_depth + self.xcr_depth <= self.depth
+        assert self.cr_depth <= self.xcr_depth <= self.depth
         
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_x = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
@@ -295,7 +295,7 @@ class Painter_Varient(nn.Module):
         for i in range(self.depth):
             if i < self.cr_depth:
                 input_size = (img_size[0] // patch_size, img_size[1] // patch_size)
-            elif i < self.cr_depth + self.xcr_depth:
+            elif i < self.xcr_depth:
                 input_size = ((self.num_prompts + 1) * img_size[0] // patch_size, img_size[1] // patch_size)
             else:
                 input_size = (2 * img_size[0] // patch_size, img_size[1] // patch_size)
@@ -363,27 +363,31 @@ class Painter_Varient(nn.Module):
         mask = self.mask_token.expand(1, Hp, Wp, -1) # (1, Hp, Wp, C)
         x = torch.stack([i, t], dim=0) # (2, num_prompts, Hp, Wp, C)
         x = torch.cat([x, torch.stack([q, mask], dim=0)], dim=1) # (2, num_prompts+1, Hp, Wp, C)
-        x = x.reshape(-1, Hp, Wp, C) # (2*(num_prompts+1), Hp, Wp, C)
-        assert x.shape == (2 * (self.num_prompts + 1), Hp, Wp, C)
+        assert x.shape == (2, self.num_prompts + 1, Hp, Wp, C)
         if self.pos_embed is not None:
             x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
         latents = []
         for idx, blk in enumerate(self.blocks):
+            if idx == self.merge_layer:
+                x = x.mean(0, keepdim=True)
+            if idx == self.cr_depth:
+                x = x.reshape(-1, 1, (self.num_prompts + 1) * Hp, Wp, C)
+            if idx == self.xcr_depth:
+                x = x.reshape(-1, self.num_prompts + 1, Hp, Wp, C)
+                p, y = x.split((self.num_prompts, 1), dim=1)
+                x = torch.cat([torch.mean(p, dim=1, keepdim=True), y], dim=1)
+            ori_shape = x.shape
+            x = x.reshape(-1, *(blk.input_size), C)
             x = blk(x)
-            if idx == self.merge_idx:
-                x = x.reshape(2, (self.num_prompts + 1), Hp, Wp, C)
-                x = (x[0] + x[1]) * 0.5 # (num_prompts+1, Hp, Wp, C)
-            if idx == self.cr_depth - 1:
-                x = x.reshape(1, (self.num_prompts + 1) * Hp, Wp, C)
-            if idx == self.cr_depth + self.xcr_depth - 1:
-                x = x.reshape(self.num_prompts + 1, Hp, Wp, C)
-                p, y = x.split((self.num_prompts, 1), dim=0)
-                x = torch.cat([torch.mean(p, dim=0, keepdim=True), y], dim=0)
-                x = x.reshape(1, 2 * Hp, Wp, C)
+            x = x.reshape(ori_shape)
             if idx in self.encoder_sampling:
-                latents.append(self.norm(x.reshape(-1, Hp, Wp, C)[-1]))
+                feat = torch.reshape(x, (ori_shape[0], -1, Hp, Wp, C))
+                feat_prompts, feat_query = torch.split(feat.mean(0), (feat.shape[1]-1, 1), dim=0)
+                feat_prompt = feat_prompts.mean(dim=0, keepdim=True) # (1, Hp, Wp, C)
+                single_latent = self.norm(torch.cat((feat_prompt, feat_query), dim=1).squeeze(0)) # (2 * Hp, Wp, C)
+                latents.append(single_latent)
         latent = torch.cat(latents, dim=-1)
-        assert latent.shape == (Hp, Wp, 4 * C)
+        assert latent.shape == (2 * Hp, Wp, 4 * C)
         return latent
 
     def forward_decoder(self, latent):
@@ -393,8 +397,9 @@ class Painter_Varient(nn.Module):
         Hl, Wl, _= x.shape
         x = x.reshape(Hl, Wl, ps, ps, self.decoder_embed_dim)
         x = torch.einsum('hwpqc->hpwqc', x)
-        x = x.reshape(Hl * ps, Wl * ps, self.decoder_embed_dim).permute(2, 0, 1) # (D, Hd, Wd)
-        pred = self.decoder_pred(x).permute(1, 2, 0) # (H, W, 3)
+        x = x.reshape(Hl * ps, Wl * ps, self.decoder_embed_dim).permute(2, 0, 1) # (D, 2 * Hd, Wd)
+        pred = self.decoder_pred(x).permute(1, 2, 0) # (2 * H, W, 3)
+        pred = pred.chunk(2, dim=0)[-1]
         return pred
 
     def forward_loss(self, pred, label):
@@ -418,7 +423,7 @@ class Painter_Varient(nn.Module):
         return ret
 
 
-def painter_varient_patch16_win_dec64_8glb_sl1(**kwargs):
+def painter_varient_1_patch16_win_dec64_8glb_sl1(**kwargs):
     model = Painter_Varient(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

@@ -12,14 +12,17 @@ class DatasetTest(Dataset):
     """
     define dataset for ddp
     """
-    def __init__(self, img_src_dir, input_size, ext_list=('*.png', '*.jpg'), ):
+    def __init__(self, img_src_dir, input_size, num_val=None, ext_list=('*.png', '*.jpg'), ):
         super(DatasetTest, self).__init__()
         self.img_src_dir = img_src_dir
         self.input_size = input_size
 
         img_path_list = []
         for ext in ext_list:
-            img_path_tmp = glob.glob(os.path.join(img_src_dir, ext))
+            if num_val is not None:
+                img_path_tmp = glob.glob(os.path.join(img_src_dir, ext))[:num_val]
+            else:
+                img_path_tmp = glob.glob(os.path.join(img_src_dir, ext))
             img_path_list.extend(img_path_tmp)
         self.img_path_list = img_path_list
 
