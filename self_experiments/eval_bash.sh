@@ -8,7 +8,7 @@ CKPT_FILE="painter_vit_large.pth"
 
 SIZE=448
 MODEL_NAME="painter_varient_1"
-CKPT_PATH="models/${JOB_NAME}/${CKPT_FILE}"
+CKPT_PATH="pretrained/${JOB_NAME}/${CKPT_FILE}"
 OUTPUT_DIR="self_experiments/${MODEL_NAME}"
 
 # inference and post_evaluation

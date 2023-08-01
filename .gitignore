@@ -1,7 +1,7 @@
 __pycache__
 datasets/
 # toy_datasets/
-models
+pretrained
 models_inference
 work_dirs/
 wandb
