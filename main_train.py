@@ -29,7 +29,7 @@ from util.misc import get_parameter_groups
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.pos_embed import interpolate_pos_embed
 
-import models_painter
+import new_models.models_painter as models_painter
 
 from engine_train import train_one_epoch, evaluate_pt
 

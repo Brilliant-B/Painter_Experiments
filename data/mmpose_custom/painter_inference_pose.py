@@ -26,7 +26,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 
 sys.path.append('.')
-import models_painter
+import new_models.models_painter as models_painter
 from util.ddp_utils import DatasetTest
 from util import ddp_utils
 

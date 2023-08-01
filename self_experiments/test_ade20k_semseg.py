@@ -37,7 +37,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from util.ddp_utils import DatasetTest
 from util import ddp_utils
-import painter_variant_1
+import new_models.painter_variant_1 as painter_variant_1
 
 
 imagenet_mean = np.array([0.485, 0.456, 0.406])

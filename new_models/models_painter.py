@@ -56,30 +56,36 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
+
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
+
         self.use_rel_pos = use_rel_pos
         if self.use_rel_pos:
             # initialize relative positional embeddings
             self.rel_pos_h = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
             self.rel_pos_w = nn.Parameter(torch.zeros(2 * input_size[1] - 1, head_dim))
+
             if not rel_pos_zero_init:
                 trunc_normal_(self.rel_pos_h, std=0.02)
                 trunc_normal_(self.rel_pos_w, std=0.02)
 
-    def forward(self, x, parallel_batch=True):
+    def forward(self, x):
         B, H, W, _ = x.shape
-        # qkv with shape (3, nHead, B, H * W, C)
-        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 3, 0, 1, 4)
-        # q, k, v with shape (nHead * B, H * W, C)
-        q, k, v = qkv.reshape(3, self.num_heads * B, H * W, -1).unbind(0)
+        # qkv with shape (3, B, nHead, H * W, C)
+        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q, k, v = qkv.reshape(3, B * self.num_heads, H * W, -1).unbind(0)
+
         attn = (q * self.scale) @ k.transpose(-2, -1)
+
         if self.use_rel_pos:
             attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+
         attn = attn.softmax(dim=-1)
-        print(attn.shape)
-        x = (attn @ v).view(self.num_heads, B, H, W, -1).permute(1, 2, 3, 0, 4).reshape(B, H, W, -1)
+        x = (attn @ v).view(B, self.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
         x = self.proj(x)
+
         return x
 
 
@@ -88,6 +94,7 @@ class ResBottleneckBlock(CNNBlockBase):
     The standard bottleneck residual block without the last activation layer.
     It contains 3 conv layers with kernels 1x1, 3x3, 1x1.
     """
+
     def __init__(
         self,
         in_channels,
@@ -145,6 +152,7 @@ class ResBottleneckBlock(CNNBlockBase):
 
 class Block(nn.Module):
     """Transformer blocks with support of window attention and residual propagation blocks"""
+
     def __init__(
         self,
         dim,
@@ -178,7 +186,6 @@ class Block(nn.Module):
                 parameter size.
         """
         super().__init__()
-        self.input_size = input_size
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
             dim,
@@ -188,10 +195,13 @@ class Block(nn.Module):
             rel_pos_zero_init=rel_pos_zero_init,
             input_size=input_size if window_size == 0 else (window_size, window_size),
         )
+
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(in_features=dim, hidden_features=int(dim * mlp_ratio), act_layer=act_layer)
+
         self.window_size = window_size
+
         self.use_residual_block = use_residual_block
         if use_residual_block:
             # Use a residual block with bottleneck channel as dim // 2
@@ -204,253 +214,25 @@ class Block(nn.Module):
             )
 
     def forward(self, x):
-        assert x.shape[1:3] == self.input_size
         shortcut = x
         x = self.norm1(x)
         # Window partition
         if self.window_size > 0:
+            H, W = x.shape[1], x.shape[2]
             x, pad_hw = window_partition(x, self.window_size)
+
         x = self.attn(x)
         # Reverse window partition
         if self.window_size > 0:
-            x = window_unpartition(x, self.window_size, pad_hw, self.input_size)
+            x = window_unpartition(x, self.window_size, pad_hw, (H, W))
+
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+
         if self.use_residual_block:
             x = self.residual(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+
         return x
-
-
-class Painter_Varient(nn.Module):
-    """ Masked Autoencoder with VisionTransformer backbone
-    """
-    def __init__(
-            self,
-            img_size=(448, 448),
-            patch_size=16,
-            in_chans=3,
-            embed_dim=1024,
-            depth=24,
-            num_heads=16,
-            merge_idx=2,
-            num_prompts=1,
-            cr_depth=12,
-            mlp_ratio=4.,
-            qkv_bias=True,
-            drop_path_rate=0.,
-            norm_layer=nn.LayerNorm,
-            act_layer=nn.GELU,
-            use_abs_pos=True,
-            use_rel_pos=False,
-            rel_pos_zero_init=True,
-            window_size=0,
-            window_block_indexes=(),
-            residual_block_indexes=(),
-            use_act_checkpoint=False,
-            pretrain_img_size=224,
-            pretrain_use_cls_token=True,
-            out_feature="last_feat",
-            decoder_embed_dim=128,
-            loss_func="smoothl1",
-        ):
-        super().__init__()
-
-        # --------------------------------------------------------------------------
-        self.img_size = img_size
-        self.pretrain_use_cls_token = pretrain_use_cls_token
-        self.patch_size = patch_size
-        self.depth = depth
-        self.patch_embed = PatchEmbed(
-            kernel_size=(patch_size, patch_size),
-            stride=(patch_size, patch_size),
-            in_chans=in_chans,
-            embed_dim=embed_dim,
-        )
-        self.patch_embed.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
-        self.loss_func = loss_func
-        self.merge_idx = merge_idx
-        self.encoder_sampling = set([5, 11, 17, 23])
-        self.num_prompts = num_prompts
-        self.cr_depth = cr_depth
-        assert self.merge_idx < self.cr_depth <= self.depth
-        
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
-        self.segment_token_x = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
-        self.segment_token_y = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
-
-        if use_abs_pos:
-            # Initialize absolute positional embedding with pretrain image size.
-            num_patches = (pretrain_img_size // patch_size) * (pretrain_img_size // patch_size)
-            num_positions = (num_patches + 1) if pretrain_use_cls_token else num_patches
-            self.pos_embed = nn.Parameter(torch.zeros(1, num_positions, embed_dim), requires_grad=True)
-        else:
-            self.pos_embed = None
-
-        # stochastic depth decay rule
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]
-
-        self.blocks = nn.ModuleList()
-        for i in range(self.depth):
-            block = Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                use_rel_pos=use_rel_pos,
-                rel_pos_zero_init=rel_pos_zero_init,
-                window_size=window_size if i in window_block_indexes else 0,
-                use_residual_block=i in residual_block_indexes,
-                input_size=(img_size[0] // patch_size, img_size[1] // patch_size) if i < self.cr_depth \
-                    else ((self.num_prompts + 1) * img_size[0] // patch_size, img_size[1] // patch_size),
-            )
-            if use_act_checkpoint:
-                block = checkpoint_wrapper(block)
-            self.blocks.append(block)
-
-        self._out_feature_channels = {out_feature: embed_dim}
-        self._out_feature_strides = {out_feature: patch_size}
-        self._out_features = [out_feature]
-
-        if self.pos_embed is not None:
-            trunc_normal_(self.pos_embed, std=0.02)
-        self.norm = norm_layer(embed_dim)
-
-        # --------------------------------------------------------------------------
-
-        # --------------------------------------------------------------------------
-        self.decoder_embed_dim = decoder_embed_dim
-        self.decoder_embed = nn.Linear(embed_dim*4, patch_size ** 2 * self.decoder_embed_dim, bias=True)
-        self.decoder_pred = nn.Sequential(
-            nn.Conv2d(self.decoder_embed_dim, self.decoder_embed_dim, kernel_size=3, padding=1),
-            LayerNorm2D(self.decoder_embed_dim),
-            nn.GELU(),
-            nn.Conv2d(self.decoder_embed_dim, 3, kernel_size=1, bias=True),
-        )
-        # --------------------------------------------------------------------------
-        torch.nn.init.normal_(self.mask_token, std=.02)
-        torch.nn.init.normal_(self.segment_token_x, std=.02)
-        torch.nn.init.normal_(self.segment_token_y, std=.02)
-        self.apply(self._init_weights)
-
-    def _init_weights(self, m):
-        if isinstance(m, nn.Linear):
-            trunc_normal_(m.weight, std=0.02)
-            if isinstance(m, nn.Linear) and m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-        elif isinstance(m, nn.LayerNorm):
-            nn.init.constant_(m.bias, 0)
-            nn.init.constant_(m.weight, 1.0)
-
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'pos_embed', 'cls_token'}
-
-    def patchify(self, imgs):
-        """
-        imgs: (N, 3, H, W)
-        x: (N, L, patch_size**2 *3)
-        """
-        p = self.patch_size
-        assert imgs.shape[2] == (self.num_prompts + 1) * imgs.shape[3] and imgs.shape[2] % p == 0
-        w = imgs.shape[3] // p
-        h = w * (self.num_prompts + 1)
-        x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
-        x = torch.einsum('nchpwq->nhwpqc', x)
-        x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
-        return x
-
-    def unpatchify(self, x):
-        """
-        x: (N, L, patch_size**2 *3)
-        imgs: (N, 3, H, W)
-        """
-        p = self.patch_size
-        w = int((x.shape[1]//(self.num_prompts + 1))**.5)
-        h = w * (self.num_prompts + 1)
-        assert h * w == x.shape[1]
-        x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
-        x = torch.einsum('nhwpqc->nchpwq', x)
-        imgs = x.reshape(shape=(x.shape[0], 3, h * p, w * p))
-        return imgs
-
-    def forward_encoder(self, prompts, query):
-        img, tgt = prompts[0], prompts[1] # img/tgt: (num_prompts, H, W, 3); query: (1, H, W, 3)
-        i = self.patch_embed(img.permute(0, 3, 1, 2)) + self.segment_token_x
-        t = self.patch_embed(tgt.permute(0, 3, 1, 2)) + self.segment_token_y
-        q = self.patch_embed(query.permute(0, 3, 1, 2)) + self.segment_token_x 
-        assert i.shape[1:] == t.shape[1:] == q.shape[1:]
-        assert q.shape[-1] == self.mask_token.shape[-1]
-        _, Hp, Wp, C = i.shape
-        mask = self.mask_token.expand(1, Hp, Wp, -1) # (1, Hp, Wp, C)
-        x = torch.stack([i, t], dim=0) # (2, num_prompts, Hp, Wp, C)
-        x = torch.cat([x, torch.stack([q, mask], dim=0)], dim=1) # (2, num_prompts+1, Hp, Wp, C)
-        x = x.reshape(-1, Hp, Wp, C) # (2*(num_prompts+1), Hp, Wp, C)
-        assert x.shape == (2 * (self.num_prompts + 1), Hp, Wp, C)
-        if self.pos_embed is not None:
-            x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-        latents = []
-        for idx, blk in enumerate(self.blocks):
-            x = blk(x)
-            if idx == self.merge_idx:
-                x = x.reshape(2, (self.num_prompts + 1), Hp, Wp, C)
-                x = (x[0] + x[1]) * 0.5 # (num_prompts+1, Hp, Wp, C)
-            if idx == self.cr_depth - 1:
-                x = x.reshape(1, (self.num_prompts + 1) * Hp, Wp, C)
-            if idx in self.encoder_sampling:
-                latents.append(self.norm(x.reshape(self.num_prompts + 1, Hp, Wp, C)))
-        latent = torch.cat(latents, dim=-1)[-1]
-        assert latent.shape == (Hp, Wp, 4 * C)
-        return latent
-
-    def forward_decoder(self, latent):
-        # predictor projection
-        x = self.decoder_embed(latent)
-        ps = self.patch_size
-        Hl, Wl, _= x.shape
-        x = x.reshape(Hl, Wl, ps, ps, self.decoder_embed_dim)
-        x = torch.einsum('hwpqc->hpwqc', x)
-        x = x.reshape(Hl * ps, Wl * ps, self.decoder_embed_dim).permute(2, 0, 1) # (D, Hd, Wd)
-        pred = self.decoder_pred(x).permute(1, 2, 0) # (H, W, 3)
-        return pred
-
-    def forward_loss(self, pred, label):
-        if self.loss_func == "l1l2":
-            loss = ((pred - label).abs() + (pred - label) ** 2.) * 0.5
-        elif self.loss_func == "l1":
-            loss = (pred - label).abs()
-        elif self.loss_func == "l2":
-            loss = (pred - label) ** 2.
-        elif self.loss_func == "smoothl1":
-            loss = F.smooth_l1_loss(pred, label, reduction="none", beta=0.01)
-        Loss = loss.sum() / (loss.numel() + 1e-2)  # mean loss on removed patches
-        return Loss
-
-    def forward(self, prompts, query, label=None):
-        latent = self.forward_encoder(prompts, query)
-        ret = pred = self.forward_decoder(latent)
-        if label is not None:
-            loss = self.forward_loss(pred, label)
-            ret = (loss, pred)
-        return ret
-
-
-def painter_varient_patch16_win_dec64_8glb_sl1(**kwargs):
-    model = Painter_Varient(
-        img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
-        drop_path_rate=0.1, window_size=14, qkv_bias=True,
-        mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6),
-        window_block_indexes=(list(range(0, 2)) + list(range(3, 5)) + list(range(6, 8)) + list(range(9, 11)) + \
-                                list(range(12, 14)), list(range(15, 17)), list(range(18, 20)), list(range(21, 23))),
-        residual_block_indexes=[], use_rel_pos=True, out_feature="last_feat",
-        decoder_embed_dim=64,
-        loss_func="smoothl1",
-        **kwargs)
-    return model
-
-
 
 
 class Painter(nn.Module):
@@ -464,8 +246,6 @@ class Painter(nn.Module):
              embed_dim=1024,
              depth=24,
              num_heads=16,
-             num_prompts=1,
-             merge_idx=2,
              mlp_ratio=4.,
              qkv_bias=True,
              drop_path_rate=0.,
@@ -553,8 +333,6 @@ class Painter(nn.Module):
         )
         # --------------------------------------------------------------------------
         self.loss_func = loss_func
-        self.merge_idx = merge_idx
-        self.num_prompts = num_prompts
 
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.segment_token_x, std=.02)
@@ -580,10 +358,10 @@ class Painter(nn.Module):
         x: (N, L, patch_size**2 *3)
         """
         p = self.patch_size
-        assert imgs.shape[2] == (self.num_prompts + 1) * imgs.shape[3] and imgs.shape[2] % p == 0
+        assert imgs.shape[2] == 2 * imgs.shape[3] and imgs.shape[2] % p == 0
 
         w = imgs.shape[3] // p
-        h = w * (self.num_prompts + 1)
+        h = w * 2
         x = imgs.reshape(shape=(imgs.shape[0], 3, h, p, w, p))
         x = torch.einsum('nchpwq->nhwpqc', x)
         x = x.reshape(shape=(imgs.shape[0], h * w, p**2 * 3))
@@ -595,8 +373,8 @@ class Painter(nn.Module):
         imgs: (N, 3, H, W)
         """
         p = self.patch_size
-        w = int((x.shape[1]//(self.num_prompts + 1))**.5)
-        h = w * (self.num_prompts + 1)
+        w = int((x.shape[1]*0.5)**.5)
+        h = w * 2
         assert h * w == x.shape[1]
         
         x = x.reshape(shape=(x.shape[0], h, w, p, p, 3))
@@ -608,11 +386,10 @@ class Painter(nn.Module):
         # embed patches
         x = self.patch_embed(imgs)
         y = self.patch_embed(tgts)
-        B, Hp, Wp, _ = x.size()
-        x = x.reshape(B, Hp,)
-        Lp = Hp * Wp
+        batch_size, Hp, Wp, _ = x.size()
+        seq_len = Hp * Wp
 
-        mask_token = self.mask_token.expand(B, Hp, Wp, -1)
+        mask_token = self.mask_token.expand(batch_size, Hp, Wp, -1)
         # replace the masked visual tokens by mask_token
         w = bool_masked_pos.unsqueeze(-1).type_as(mask_token).reshape(-1, Hp, Wp, 1)
         y = y * (1 - w) + mask_token * w
@@ -627,13 +404,14 @@ class Painter(nn.Module):
             y = y + get_abs_pos(
                 self.pos_embed, self.pretrain_use_cls_token, (y.shape[1], y.shape[2])
             )
-        
+
+        merge_idx = 2
         x = torch.cat((x, y), dim=0)
         # apply Transformer blocks
         out = []
         for idx, blk in enumerate(self.blocks):
             x = blk(x)
-            if idx == self.merge_idx:
+            if idx == merge_idx:
                 x = (x[:x.shape[0]//2] + x[x.shape[0]//2:]) * 0.5
             if idx in [5, 11, 17, 23]:
                 out.append(self.norm(x))
@@ -648,6 +426,7 @@ class Painter(nn.Module):
         x = x.reshape(shape=(x.shape[0], h, w, p, p, self.decoder_embed_dim))
         x = torch.einsum('nhwpqc->nchpwq', x)
         x = x.reshape(shape=(x.shape[0], -1, h * p, w * p))
+
         x = self.decoder_pred(x) # Bx3xHxW
         return x
 
@@ -687,11 +466,11 @@ class Painter(nn.Module):
             bool_masked_pos = torch.zeros((imgs.shape[0], self.patch_embed.num_patches), dtype=torch.bool).to(imgs.device)
         else:
             bool_masked_pos = bool_masked_pos.flatten(1).to(torch.bool)
-        
         latent = self.forward_encoder(imgs, tgts, bool_masked_pos)
         pred = self.forward_decoder(latent)  # [N, L, p*p*3]
         loss = self.forward_loss(pred, tgts, bool_masked_pos, valid)
         return loss, self.patchify(pred), bool_masked_pos
+
 
 
 def painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1(**kwargs):
@@ -726,4 +505,3 @@ def get_vit_lr_decay_rate(name, lr_decay_rate=1.0, num_layers=12):
             layer_id = int(name[name.find(".blocks.") :].split(".")[2]) + 1
 
     return lr_decay_rate ** (num_layers + 1 - layer_id)
-

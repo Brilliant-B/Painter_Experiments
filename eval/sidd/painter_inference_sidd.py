@@ -26,7 +26,7 @@ from PIL import Image
 import scipy.io as sio
 
 sys.path.append('.')
-import models_painter
+import new_models.models_painter as models_painter
 
 from skimage.metrics import peak_signal_noise_ratio as psnr_loss
 from skimage.metrics import structural_similarity as ssim_loss

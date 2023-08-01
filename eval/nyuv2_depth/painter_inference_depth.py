@@ -21,7 +21,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 
 sys.path.append('.')
-import models_painter
+import new_models.models_painter as models_painter
 
 
 imagenet_mean = np.array([0.485, 0.456, 0.406])
