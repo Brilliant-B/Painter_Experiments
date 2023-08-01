@@ -8,7 +8,7 @@ This repo is the modification and experiments of **Painter**. <br>
 for installation & data preparation & pretrained preparation, please refer to [Official docs](docs/Official_README.md).
 
 ## Models
-The modified Painter model is in the directory `$Painter_ROOT/new_models/` <br>
+The modified Painter model is in the directory `$Painter_ROOT/models/` <br>
 - original painter: `models_painter.py`
 - Painter Variant 0: `painter_variant_0.py`
 - **Painter Variant 1:** `painter_variant_1.py`
