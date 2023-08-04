@@ -1,11 +1,10 @@
 __pycache__
 datasets/
 # toy_datasets/
-pretrained
-models_inference
-work_dirs/
+pretrained/
+models_inference/
+workbench/
 wandb
-datasets
 .idea
 
 .nfs*

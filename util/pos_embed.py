@@ -10,6 +10,7 @@
 import numpy as np
 
 import torch
+import torch.nn.functional as F
 
 # --------------------------------------------------------
 # 2D sine-cosine position embedding
@@ -89,8 +90,22 @@ def interpolate_pos_embed(model, checkpoint_model):
             # only the position tokens are interpolated
             pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
             pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
-            pos_tokens = torch.nn.functional.interpolate(
+            pos_tokens = F.interpolate(
                 pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
             pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
             new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
             checkpoint_model['pos_embed'] = new_pos_embed
+            
+def interpolate_rel_pos_embed(model, checkpoint):
+    for i in range(model.cr_depth):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
+    for i in range(model.cr_depth, model.xcr_depth):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(model.num_prompts * 56 + 55), mode='linear')[0].permute(1, 0)
+    for i in range(model.xcr_depth, 24):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)

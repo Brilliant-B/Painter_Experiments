@@ -37,6 +37,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from util.ddp_utils import DatasetTest
 from util import ddp_utils
+from util.pos_embed import interpolate_rel_pos_embed
 import models.painter_variant_1 as painter_variant_1
 
 
@@ -157,7 +158,7 @@ class SemSegEvaluatorCustom(SemSegEvaluator):
         return pred
 
 
-def prepare_model(chkpt_dir, arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1', args=None, prints=True):
+def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1', args=None, prints=True):
     # build model
     print(f'n_contexts: {args.num_prompts}, cr-depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}')
     model = getattr(painter_variant_1, arch)(num_prompts=args.num_prompts, cr_depth=args.cr_depth, xcr_depth=args.xcr_depth)    
@@ -180,19 +181,8 @@ def prepare_model(chkpt_dir, arch='painter_vit_large_patch16_input896x448_win_de
     model_without_ddp = model.module
     
     # load model
-    checkpoint = torch.load(chkpt_dir, map_location='cpu')['model']
-    for i in range(args.cr_depth):
-        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
-        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
-            param, size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
-    for i in range(args.cr_depth, args.xcr_depth):
-        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
-        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
-            param, size=(args.num_prompts * 56 + 55), mode='linear')[0].permute(1, 0)
-    # for i in range(args.xcr_depth, 24):
-    #     param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
-    #     checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
-    #         param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)
+    checkpoint = torch.load(args.ckpt_path, map_location='cpu')['model']
+    interpolate_rel_pos_embed(model_without_ddp, checkpoint)
         
     msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
     if prints:
@@ -201,15 +191,26 @@ def prepare_model(chkpt_dir, arch='painter_vit_large_patch16_input896x448_win_de
     return model, None if not args.test_flops else flops
 
 
-def run_one_image(prompts, query, img_size, model, out_path, device):
-    pred = model(prompts.float().to(device), query.float().to(device))
-    output = pred.detach().cpu()
+def run_one_image(prompts, query, img_size, model, device):
+    target = torch.zeros_like(query)
+    mask = torch.ones(model.module.ori_window_size).unsqueeze(0)
+    valid = torch.ones_like(target)
+    # valid for ade20k
+    imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
+    imagenet_std = torch.tensor([0.229, 0.224, 0.225])
+    thres = torch.ones(3) * (1e-5) # ignore black
+    thres = (thres - imagenet_mean) / imagenet_std
+    valid[target < thres[None, None, :]] = 0
+    valid = valid.float()
+
+    _, pred, _ = model(prompts.float().to(device), query.float().to(device), target.float().to(device), 
+                       mask.float().to(device), valid.float().to(device))
+    output= pred.detach().cpu()
     output = torch.clip((output * imagenet_std + imagenet_mean) * 255, 0, 255)
-    output = F.interpolate(output.unsqueeze(0).permute(0, 3, 1, 2), size=(img_size[1], img_size[0]),
+    output = F.interpolate(output.permute(0, 3, 1, 2), size=img_size[::-1],
         mode='bilinear').permute(0, 2, 3, 1)[0]
     assert output.shape[-1] == 3
     output = output.int()
-    output = Image.fromarray(output.numpy().astype(np.uint8))
     return output
 
 
@@ -239,7 +240,7 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
     copy_paste_results = dict()
     
     if args.infer:
-        model_painter, flops = prepare_model(ckpt_path, model, args=args, prints=False)
+        model_painter, flops = prepare_model(model, args=args, prints=False)
         device = torch.device("cuda")
         model_painter.to(device)
         
@@ -267,8 +268,8 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
             prompt = torch.stack([imgp, tgtp], dim=0)
             prompt = (prompt - imagenet_mean) / imagenet_std
             prompts.append(prompt)
-        prompts = torch.stack(prompts, dim=1)
-        assert prompts.shape == (2, num_prompts, img_size, img_size, 3)
+        prompts = torch.stack(prompts, dim=1).unsqueeze(0)
+        assert prompts.shape == (1, 2, num_prompts, img_size, img_size, 3)
         
         T0 = time.perf_counter()
         model_painter.eval()
@@ -281,10 +282,9 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
             query = torch.from_numpy(img).unsqueeze(0)
             query = (query - imagenet_mean) / imagenet_std
             assert query.shape == (1, img_size, img_size, 3)
-            # make random mask reproducible (comment out to make it change)
-            # torch.manual_seed(2)
-            output = run_one_image(prompts, query, size, model_painter, out_path, device)
+            output = run_one_image(prompts, query, size, model_painter, device)
             if not warm_up:
+                output = Image.fromarray(output.numpy().astype(np.uint8))
                 output.save(out_path)
         T1 = time.perf_counter()
         TIME = T1 - T0

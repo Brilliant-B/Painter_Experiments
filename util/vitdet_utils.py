@@ -203,8 +203,8 @@ class LayerNorm2D(nn.Module):
         self.normalized_shape = (normalized_shape,)
 
     def forward(self, x):
-        u = x.mean(0, keepdim=True)
-        s = (x - u).pow(2).mean(0, keepdim=True)
+        u = x.mean(1, keepdim=True)
+        s = (x - u).pow(2).mean(1, keepdim=True)
         x = (x - u) / torch.sqrt(s + self.eps)
-        x = self.weight[:, None, None] * x + self.bias[:, None, None]
+        x = self.weight[None, :, None, None] * x + self.bias[None, :, None, None]
         return x

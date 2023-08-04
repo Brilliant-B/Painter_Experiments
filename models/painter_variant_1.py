@@ -1,19 +1,8 @@
-# --------------------------------------------------------
-# Images Speak in Images: A Generalist Painter for In-Context Visual Learning (https://arxiv.org/abs/2212.02499)
-# Github source: https://github.com/baaivision/Painter
-# Copyright (c) 2022 Beijing Academy of Artificial Intelligence (BAAI)
-# Licensed under The MIT License [see LICENSE for details]
-# By Xinlong Wang, Wen Wang
-# Based on MAE, BEiT, detectron2, Mask2Former, bts, mmcv, mmdetetection, mmpose, MIRNet, MPRNet, and Uformer codebases
-# --------------------------------------------------------'
-
-from functools import partial
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from functools import partial
 
-##########################
 import fvcore.nn.weight_init as weight_init
 from detectron2.layers import CNNBlockBase, Conv2d, get_norm
 from fairscale.nn.checkpoint import checkpoint_wrapper
@@ -32,7 +21,6 @@ from util.vitdet_utils import (
 
 class Attention(nn.Module):
     """Multi-head Attention block with relative position embeddings."""
-
     def __init__(
         self,
         dim,
@@ -138,7 +126,6 @@ class ResBottleneckBlock(CNNBlockBase):
         out = x
         for layer in self.children():
             out = layer(out)
-
         out = x + out
         return out
 
@@ -258,6 +245,7 @@ class Painter_Varient(nn.Module):
 
         # --------------------------------------------------------------------------
         self.img_size = img_size
+        self.ori_window_size = (img_size[0] // patch_size, img_size[1] // patch_size)
         self.pretrain_use_cls_token = pretrain_use_cls_token
         self.patch_size = patch_size
         self.depth = depth
@@ -294,11 +282,11 @@ class Painter_Varient(nn.Module):
         self.blocks = nn.ModuleList()
         for i in range(self.depth):
             if i < self.cr_depth:
-                input_size = (img_size[0] // patch_size, img_size[1] // patch_size)
+                input_size = self.ori_window_size
             elif i < self.xcr_depth:
-                input_size = ((self.num_prompts + 1) * img_size[0] // patch_size, img_size[1] // patch_size)
+                input_size = ((self.num_prompts + 1) * self.ori_window_size[0], self.ori_window_size[1])
             else:
-                input_size = (2 * img_size[0] // patch_size, img_size[1] // patch_size)
+                input_size = (2 * self.ori_window_size[0], self.ori_window_size[1])
             block = Block(
                 dim=embed_dim,
                 num_heads=num_heads,
@@ -326,7 +314,7 @@ class Painter_Varient(nn.Module):
         self.norm = norm_layer(embed_dim)
         
         self.decoder_embed_dim = decoder_embed_dim
-        self.decoder_embed = nn.Linear(embed_dim*4, patch_size ** 2 * self.decoder_embed_dim, bias=True)
+        self.decoder_embed = nn.Linear(embed_dim * 4, patch_size ** 2 * self.decoder_embed_dim, bias=True)
         self.decoder_pred = nn.Sequential(
             nn.Conv2d(self.decoder_embed_dim, self.decoder_embed_dim, kernel_size=3, padding=1),
             LayerNorm2D(self.decoder_embed_dim),
@@ -352,75 +340,104 @@ class Painter_Varient(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
 
-    def forward_encoder(self, prompts, query):
-        img, tgt = prompts[0], prompts[1] # img/tgt: (num_prompts, H, W, 3); query: (1, H, W, 3)
+    def forward_encoder(self, prompts, query, target, mask):
+        # prompts: (B, 2, num_prompts, H, W, 3)
+        img, tgt = torch.transpose(prompts, 0, 1)[0].flatten(0, 1), torch.transpose(prompts, 0, 1)[1].flatten(0, 1)
+        # img & tgt: (B * num_prompts, H, W, 3); query & target: (B, H, W, 3)
         i = self.patch_embed(img.permute(0, 3, 1, 2)) + self.segment_token_x
         t = self.patch_embed(tgt.permute(0, 3, 1, 2)) + self.segment_token_y
-        q = self.patch_embed(query.permute(0, 3, 1, 2)) + self.segment_token_x 
-        assert i.shape[1:] == t.shape[1:] == q.shape[1:]
-        assert q.shape[-1] == self.mask_token.shape[-1]
-        _, Hp, Wp, C = i.shape
-        mask = self.mask_token.expand(1, Hp, Wp, -1) # (1, Hp, Wp, C)
-        x = torch.stack([i, t], dim=0) # (2, num_prompts, Hp, Wp, C)
-        x = torch.cat([x, torch.stack([q, mask], dim=0)], dim=1) # (2, num_prompts+1, Hp, Wp, C)
-        assert x.shape == (2, self.num_prompts + 1, Hp, Wp, C)
+        qi = self.patch_embed(query.permute(0, 3, 1, 2)) + self.segment_token_x
+        qt = self.patch_embed(target.permute(0, 3, 1, 2)) + self.segment_token_y
+        assert i.shape[1:] == t.shape[1:] == qi.shape[1:] == qt.shape[1:]
+        assert mask.shape[1:] == self.ori_window_size == qt.shape[1:-1]
+        assert self.mask_token.shape[-1] == i.shape[-1]
+        
+        B, Hp, Wp, C = qt.shape
+        i, t = i.reshape(B, self.num_prompts, Hp, Wp, C), t.reshape(B, self.num_prompts, Hp, Wp, C)
+        mask_token = self.mask_token.expand(B, Hp, Wp, -1) # (B, Hp, Wp, C)
+        w = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
+        qt = qt * (1 - w) + mask_token * w # (B, Hp, Hp, C)
+        
+        x = torch.stack([i, t], dim=1) # (B, 2, num_prompts, Hp, Wp, C)
+        x = torch.cat([x, torch.stack([qi, qt], dim=1).unsqueeze(2)], dim=2) # (B, 2, num_prompts+1, Hp, Wp, C)
+        assert x.shape == (B, 2, self.num_prompts + 1, Hp, Wp, C)
         if self.pos_embed is not None:
             x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
+        
         latents = []
         for idx, blk in enumerate(self.blocks):
             if idx == self.merge_layer:
-                x = x.mean(0, keepdim=True)
+                x = x.mean(1, keepdim=True)
             if idx == self.cr_depth:
-                x = x.reshape(-1, 1, (self.num_prompts + 1) * Hp, Wp, C)
+                x = x.reshape(B, -1, 1, (self.num_prompts + 1) * Hp, Wp, C)
             if idx == self.xcr_depth:
-                x = x.reshape(-1, self.num_prompts + 1, Hp, Wp, C)
-                p, y = x.split((self.num_prompts, 1), dim=1)
-                x = torch.cat([torch.mean(p, dim=1, keepdim=True), y], dim=1)
+                x = x.reshape(B, -1, self.num_prompts + 1, Hp, Wp, C)
+                p, y = x.split((self.num_prompts, 1), dim=2)
+                x = torch.cat([torch.mean(p, dim=2, keepdim=True), y], dim=2)
+            
             ori_shape = x.shape
             x = x.reshape(-1, *(blk.input_size), C)
             x = blk(x)
             x = x.reshape(ori_shape)
+            
             if idx in self.encoder_sampling:
-                feat = torch.reshape(x, (ori_shape[0], -1, Hp, Wp, C))
-                feat_prompts, feat_query = torch.split(feat.mean(0), (feat.shape[1]-1, 1), dim=0)
-                feat_prompt = feat_prompts.mean(dim=0, keepdim=True) # (1, Hp, Wp, C)
-                single_latent = self.norm(torch.cat((feat_prompt, feat_query), dim=1).squeeze(0)) # (2 * Hp, Wp, C)
+                feat = torch.reshape(x, (B, ori_shape[1], -1, Hp, Wp, C))
+                feat_prompts, feat_query = torch.split(feat.mean(1), (feat.shape[2]-1, 1), dim=1) # (B, 1, Hp, Wp, C)
+                feat_prompt = feat_prompts.mean(dim=1) # (B, Hp, Wp, C)
+                feat_query = feat_query.squeeze(1) # (B, Hp, Wp, C)
+                single_latent = self.norm(torch.cat((feat_prompt, feat_query), dim=1)) # (B, 2 * Hp, Wp, C)
                 latents.append(single_latent)
+        
         latent = torch.cat(latents, dim=-1)
-        assert latent.shape == (2 * Hp, Wp, 4 * C)
+        assert latent.shape == (B, 2 * Hp, Wp, 4 * C)
         return latent
 
     def forward_decoder(self, latent):
         # predictor projection
         x = self.decoder_embed(latent)
         ps = self.patch_size
-        Hl, Wl, _= x.shape
-        x = x.reshape(Hl, Wl, ps, ps, self.decoder_embed_dim)
-        x = torch.einsum('hwpqc->hpwqc', x)
-        x = x.reshape(Hl * ps, Wl * ps, self.decoder_embed_dim).permute(2, 0, 1) # (D, 2 * Hd, Wd)
-        pred = self.decoder_pred(x).permute(1, 2, 0) # (2 * H, W, 3)
-        pred = pred.chunk(2, dim=0)[-1]
+        B, Hl, Wl, _ = x.shape
+        x = x.reshape(B, Hl, Wl, ps, ps, self.decoder_embed_dim)
+        x = torch.einsum('bhwpqc->bhpwqc', x)
+        x = x.reshape(B, Hl * ps, Wl * ps, self.decoder_embed_dim) # (B, 2 * Hd, Wd, D)
+        pred = self.decoder_pred(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1) # (B, 2 * H, W, 3)
+        pred = pred.chunk(2, dim=1)[-1] # pred: (B, H, W, 3)
+        assert pred.shape == (B, *self.img_size, 3)
         return pred
 
-    def forward_loss(self, pred, label):
+    def forward_loss(self, pred, target, mask, valid):
+        b, h, w, p = mask.shape[0], *self.ori_window_size, self.patch_size
+        image_mask = mask.unsqueeze(-1).repeat(1, 1, 1, p ** 2 * 3)
+        image_mask = image_mask.reshape(b, h, w, p, p, 3)
+        image_mask = torch.einsum('bhwpqc->bhpwqc', image_mask)
+        image_mask = image_mask.reshape(b, h * p, w * p, 3)
+        assert image_mask.shape[1:-1] == self.img_size
+        
+        imagenet_mean=torch.tensor([0.485, 0.456, 0.406]).to(target.device)[None, None, None, :]
+        imagenet_std=torch.tensor([0.229, 0.224, 0.225]).to(target.device)[None, None, None, :]
+        inds_ign = ((target * imagenet_std + imagenet_mean) * (1 - 1. * image_mask)).sum((1, 2, 3)) < 100 * 3
+        # image_mask: (B, H, W, 3); valid: (B, H, W, 3)
+        if inds_ign.sum() > 0:
+            valid[inds_ign] = 0.
+        image_mask = image_mask * valid
+        
         if self.loss_func == "l1l2":
-            loss = ((pred - label).abs() + (pred - label) ** 2.) * 0.5
+            loss = ((pred - target).abs() + (pred - target) ** 2.) * 0.5
         elif self.loss_func == "l1":
-            loss = (pred - label).abs()
+            loss = (pred - target).abs()
         elif self.loss_func == "l2":
-            loss = (pred - label) ** 2.
+            loss = (pred - target) ** 2.
         elif self.loss_func == "smoothl1":
-            loss = F.smooth_l1_loss(pred, label, reduction="none", beta=0.01)
-        Loss = loss.sum() / (loss.numel() + 1e-2)  # mean loss on removed patches
-        return Loss
+            loss = F.smooth_l1_loss(pred, target, reduction="none", beta=0.01)
+        # loss: (B, H, W, 3)
+        Loss = (loss * image_mask).sum() / (image_mask.sum() + 1e-2)  # mean loss on removed patches
+        return Loss, image_mask
 
-    def forward(self, prompts, query, label=None):
-        latent = self.forward_encoder(prompts, query)
-        ret = pred = self.forward_decoder(latent)
-        if label is not None:
-            loss = self.forward_loss(pred, label)
-            ret = (loss, pred)
-        return ret
+    def forward(self, prompts, query, target, mask, valid):
+        latent = self.forward_encoder(prompts, query, target, mask)
+        pred = self.forward_decoder(latent)
+        loss, image_mask = self.forward_loss(pred, target, mask, valid)
+        return loss, pred, image_mask
 
 
 def painter_varient_1_patch16_win_dec64_8glb_sl1(**kwargs):
@@ -435,6 +452,7 @@ def painter_varient_1_patch16_win_dec64_8glb_sl1(**kwargs):
         loss_func="smoothl1",
         **kwargs)
     return model
+
 
 def get_vit_lr_decay_rate(name, lr_decay_rate=1.0, num_layers=12):
     """
@@ -452,6 +470,4 @@ def get_vit_lr_decay_rate(name, lr_decay_rate=1.0, num_layers=12):
             layer_id = 0
         elif ".blocks." in name and ".residual." not in name:
             layer_id = int(name[name.find(".blocks.") :].split(".")[2]) + 1
-
     return lr_decay_rate ** (num_layers + 1 - layer_id)
-
