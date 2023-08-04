@@ -9,15 +9,19 @@ for installation & data preparation & pretrained preparation, please refer to [O
 
 ## Models
 The modified Painter model is in the directory `$Painter_ROOT/models/` <br>
-- **Painter Variant 1**: `painter_variant_1.py`
-- Painter Variant 0: `painter_variant_0.py`
-- Original Painter: `models_painter.py`
+- **Painter Variant 2**: `painter_variant_2.py` <br>
+  add cr_banks and some other modifications
+- Painter Variant 1: `painter_variant_2.py` <br>
+  add controls of num_contexts/cr_depth/xcr_depth
+- Painter Variant 0: `painter_variant_0.py` <br>
+  change some of the code structure
+- Original Painter: `models_painter.py` <br>
 
 
 ## Training
 The model will be trained, mostly finetuned, based on pretrained checkpoints under multiple hyper-parameters. <br>
 For new model training experiments, check the directory `self_experiments/finetune` <br>
-You can modify and run `train_bash.sh`
+You can modify and run `train_bash.sh` <br>
 - Finetune for ADE-20K semantic segmentation: `finetune_ade20k_semseg.py` <br>
 
 (more will be issued later) <br>
