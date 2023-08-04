@@ -1,5 +1,6 @@
 import torch
 import math
+import os
 import sys
 import numpy as np
 import wandb
@@ -80,6 +81,7 @@ def train_one_epoch(model: torch.nn.Module,
         metric_logger.update(lr=lr)
         metric_logger.update(loss_scale=loss_scale_value)
         metric_logger.update(grad_norm=grad_norm)
+        log_file = os.path.join(args.output_dir, "train_log.log")
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
@@ -89,6 +91,9 @@ def train_one_epoch(model: torch.nn.Module,
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
+
+            with open(log_file, 'a') as f:
+                print(f"loss: {loss_value_reduce}, lr: {lr}, loss_scale: {loss_scale_value}, grad_norm: {grad_norm}", file=f)
 
             if global_rank == 0 and args.log_wandb:
                 wandb.log({'train_loss': loss_value_reduce, 'lr': lr, 'train_loss_scale': loss_scale_value, 'grad_norm': grad_norm})
@@ -118,7 +123,7 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
     # switch to evaluation mode
     model.eval()
     wandb_images = []
-    for prompts, query, target, mask, valid in metric_logger.log_every(data_loader, 10, header):
+    for prompts, query, target, mask, valid in metric_logger.log_every(data_loader, 50, header):
         prompts = prompts.to(device, non_blocking=True)
         query = query.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)

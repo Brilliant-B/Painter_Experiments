@@ -30,12 +30,12 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.painter_variant_1 as painter_variant_1
+import models.painter_variant_2 as painter_variant_2
 from engine_train import train_one_epoch, evaluate_pt
 
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('Painter_Variant_1 fine-tuning', add_help=False)
+    parser = argparse.ArgumentParser('Painter_Variant_2 fine-tuning', add_help=False)
     parser.add_argument('--batch_size', default=2, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=15, type=int)
@@ -101,7 +101,7 @@ def get_args_parser():
                         help='json path')
     parser.add_argument('--val_json_path', default='./', nargs='+',type=str,
                         help='json path')
-    parser.add_argument('--output_dir', default='./output_dir',
+    parser.add_argument('--base_output_dir', default='./output_dir',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default='./output_dir',
                         help='path where to tensorboard log')
@@ -153,7 +153,12 @@ def get_args_parser():
 
 def prepare_model(args, prints=False):
     # get model with args
-    model = painter_variant_1.__dict__[args.model](num_prompts=args.num_prompts, cr_depth=args.cr_depth, xcr_depth=args.xcr_depth)
+    model = painter_variant_2.__dict__[args.model](
+        num_prompts=args.num_prompts, 
+        cr_depth=args.cr_depth, 
+        xcr_depth=args.xcr_depth,
+        use_cr_bank=False,
+    )
     
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location='cpu')['model']
@@ -184,12 +189,12 @@ def prepare_model(args, prints=False):
             print(msg)
         
         # freeze part of the modules
-        freeze_code, freeze_list = args.freeze_code, []
-        if freeze_code < 3:
+        finetune_code, freeze_list = args.finetune_code, []
+        if finetune_code < 3:
             freeze_list.append("decoder*")
             code2layers = [model.cr_depth, model.xcr_depth, model.depth]
             for l in range(model.depth):
-                if l >= code2layers[freeze_code]:
+                if l >= code2layers[finetune_code]:
                     freeze_list.append(f"blocks.{l}.*")
         # print(freeze_list)
         def freeze_match(name, f_list):
@@ -253,15 +258,15 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     
-    output_dir = os.path.join(args.output_dir, \
-        f"{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.freeze_code}_freeze_code")
+    output_dir = args.output_dir = os.path.join(args.base_output_dir, \
+        f"{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print('output_dir: {}'.format(output_dir))
     print('job_dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     
     # define the model
     print("[Prepare Model]")
-    print(f"num_contexts: {args.num_prompts}, cr_depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}, frozen_start: {args.freeze_code}")
+    print(f"num_contexts: {args.num_prompts}, cr_depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}, finetune_mode: {args.finetune_code}")
     model = prepare_model(args)
     args.patch_size = patch_size = model.patch_size
     args.window_size = (args.img_size[0] // patch_size, args.img_size[1] // patch_size)
@@ -375,19 +380,27 @@ def main(args):
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+    print('Done! Training time {}'.format(total_time_str))
 
     if global_rank == 0 and args.log_wandb:
         wandb.finish()
 
 
+ # finetine_code = {0: freeze after cr, 1: freeze after xcr, 2: freeze after decoder, 3: no freeze, 4: LoRA}
 if __name__ == '__main__':
     args = get_args_parser()
     
-    args.num_prompts = 1
-    args.cr_depth = 12
-    args.xcr_depth = 15
-    # code = {0: freeze after cr, 1: freeze after xcr, 2: freeze after decoder, 3: no freeze}
-    args.freeze_code = 1 
+    num_prompts_choices = [1] # [1, 2, 3]
+    cr_depth_choices = [12] # [6, 12, 18]
+    xcr_depth_choices = [15] # [12, 15, 18]
+    finetune_choices = [1] # [0, 1, 2, 3]
+    for finetune_code in finetune_choices:
+        for num_prompts in num_prompts_choices:
+            for cr_depth in cr_depth_choices:
+                for xcr_depth in xcr_depth_choices:
+                    args.num_prompts = num_prompts
+                    args.cr_depth = cr_depth
+                    args.xcr_depth = xcr_depth
+                    args.finetune_code = finetune_code
+                    main(args)
     
-    main(args)

@@ -223,6 +223,7 @@ class Painter_Varient(nn.Module):
             num_prompts=1,
             cr_depth=12,
             xcr_depth=2,
+            use_cr_bank=True,
             mlp_ratio=4.,
             qkv_bias=True,
             drop_path_rate=0.,
@@ -263,6 +264,11 @@ class Painter_Varient(nn.Module):
         self.cr_depth = cr_depth
         self.xcr_depth = xcr_depth
         assert self.cr_depth <= self.xcr_depth <= self.depth
+        
+        self.use_cr_bank = use_cr_bank
+        if self.use_cr_bank:
+            self.cr_bank = None
+            self.latent_bank = dict()
         
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_x = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
@@ -341,26 +347,29 @@ class Painter_Varient(nn.Module):
         return {'pos_embed', 'cls_token'}
 
     def forward_encoder(self, prompts, query, target, mask):
-        # prompts: (B, 2, num_prompts, H, W, 3)
-        img, tgt = torch.transpose(prompts, 0, 1)[0].flatten(0, 1), torch.transpose(prompts, 0, 1)[1].flatten(0, 1)
-        # img & tgt: (B * num_prompts, H, W, 3); query & target: (B, H, W, 3)
-        i = self.patch_embed(img.permute(0, 3, 1, 2)) + self.segment_token_x
-        t = self.patch_embed(tgt.permute(0, 3, 1, 2)) + self.segment_token_y
         qi = self.patch_embed(query.permute(0, 3, 1, 2)) + self.segment_token_x
         qt = self.patch_embed(target.permute(0, 3, 1, 2)) + self.segment_token_y
-        assert i.shape[1:] == t.shape[1:] == qi.shape[1:] == qt.shape[1:]
-        assert mask.shape[1:] == self.ori_window_size == qt.shape[1:-1]
-        assert self.mask_token.shape[-1] == i.shape[-1]
-        
         B, Hp, Wp, C = qt.shape
-        i, t = i.reshape(B, self.num_prompts, Hp, Wp, C), t.reshape(B, self.num_prompts, Hp, Wp, C)
+        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp)
+        assert self.mask_token.shape[-1] == C
         mask_token = self.mask_token.expand(B, Hp, Wp, -1) # (B, Hp, Wp, C)
         w = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
         qt = qt * (1 - w) + mask_token * w # (B, Hp, Hp, C)
+        x = torch.stack([qi, qt], dim=1).unsqueeze(2) # (B, 2, 1, Hp, Wp, C)
+        assert x.shape == (B, 2, 1, Hp, Wp, C)
         
-        x = torch.stack([i, t], dim=1) # (B, 2, num_prompts, Hp, Wp, C)
-        x = torch.cat([x, torch.stack([qi, qt], dim=1).unsqueeze(2)], dim=2) # (B, 2, num_prompts+1, Hp, Wp, C)
-        assert x.shape == (B, 2, self.num_prompts + 1, Hp, Wp, C)
+        if not self.use_cr_bank or self.cr_bank is None:
+            # prompts: (B, 2, num_prompts, H, W, 3)
+            img, tgt = torch.transpose(prompts, 0, 1)[0].flatten(0, 1), torch.transpose(prompts, 0, 1)[1].flatten(0, 1)
+            # img & tgt: (B * num_prompts, H, W, 3); query & target: (B, H, W, 3)
+            i = self.patch_embed(img.permute(0, 3, 1, 2)) + self.segment_token_x
+            t = self.patch_embed(tgt.permute(0, 3, 1, 2)) + self.segment_token_y
+            i = i.reshape(B, self.num_prompts, Hp, Wp, C)
+            t = t.reshape(B, self.num_prompts, Hp, Wp, C)
+            px = torch.stack([i, t], dim=1) # (B, 2, num_prompts, Hp, Wp, C)
+            x = torch.cat([px, x], dim=2) # (B, 2, num_prompts+1, Hp, Wp, C)
+            assert x.shape == (B, 2, self.num_prompts + 1, Hp, Wp, C)
+        
         if self.pos_embed is not None:
             x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
         
@@ -369,6 +378,10 @@ class Painter_Varient(nn.Module):
             if idx == self.merge_layer:
                 x = x.mean(1, keepdim=True)
             if idx == self.cr_depth:
+                if self.use_cr_bank and self.cr_bank is not None:
+                    x = torch.cat([self.cr_bank, x], dim=2) # (B, -1, num_prompts+1, Hp, Wp, C)
+                elif self.use_cr_bank:
+                    self.cr_bank = x[:, :, :-1] # (B, -1, num_prompts, Hp, Wp, C)
                 x = x.reshape(B, -1, 1, (self.num_prompts + 1) * Hp, Wp, C)
             if idx == self.xcr_depth:
                 x = x.reshape(B, -1, self.num_prompts + 1, Hp, Wp, C)
@@ -381,10 +394,16 @@ class Painter_Varient(nn.Module):
             x = x.reshape(ori_shape)
             
             if idx in self.encoder_sampling:
-                feat = torch.reshape(x, (B, ori_shape[1], -1, Hp, Wp, C)).mean(1)
-                feat_prompts, feat_query = torch.split(feat, (feat.shape[2]-1, 1), dim=1) # (B, 1, Hp, Wp, C)
-                feat_prompt = feat_prompts.mean(dim=1) # (B, Hp, Wp, C)
-                feat_query = feat_query.squeeze(1) # (B, Hp, Wp, C)
+                feat = torch.reshape(x, (B, ori_shape[1], -1, Hp, Wp, C)).mean(1) # (B, -1, Hp, Wp, C)
+                if self.use_cr_bank and len(self.latent_bank) and idx in self.latent_bank.keys() and idx < self.cr_depth:
+                    feat_prompt = self.latent_bank[idx] # (B, Hp, Wp, C)
+                    feat_query = feat.squeeze(1) # (B, Hp, Wp, C)
+                else:
+                    feat_prompts, feat_query = torch.split(feat, (feat.shape[1]-1, 1), dim=1) # (B, 1, Hp, Wp, C)
+                    feat_prompt = feat_prompts.mean(dim=1) # (B, Hp, Wp, C)
+                    feat_query = feat_query.squeeze(1) # (B, Hp, Wp, C)
+                    if self.use_cr_bank and idx < self.cr_depth:
+                        self.latent_bank[idx] = feat_prompt
                 single_latent = self.norm(torch.cat((feat_prompt, feat_query), dim=1)) # (B, 2 * Hp, Wp, C)
                 latents.append(single_latent)
         
@@ -440,7 +459,7 @@ class Painter_Varient(nn.Module):
         return loss, pred, image_mask
 
 
-def painter_varient_1_patch16_win_dec64_8glb_sl1(**kwargs):
+def painter_varient_2_patch16_win_dec64_8glb_sl1(**kwargs):
     model = Painter_Varient(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

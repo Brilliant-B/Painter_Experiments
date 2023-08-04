@@ -7,7 +7,7 @@ JOB_NAME="painter_vit_large"
 CKPT_FILE="painter_vit_large.pth"
 
 SIZE=448
-MODEL_NAME="painter_varient_1"
+MODEL_NAME="painter_varient_2"
 CKPT_PATH="pretrained/${JOB_NAME}/${CKPT_FILE}"
 OUTPUT_DIR="workbench/eval_${MODEL_NAME}"
 

@@ -18,7 +18,7 @@ The modified Painter model is in the directory `$Painter_ROOT/models/` <br>
 The model will be trained, mostly finetuned, based on pretrained checkpoints under multiple hyper-parameters. <br>
 For new model training experiments, check the directory `self_experiments/finetune` <br>
 You can modify and run `train_bash.sh`
-- Finetune for ADE-20K semantic segmentation: `cr_finetune_ade20k_semseg.py` <br>
+- Finetune for ADE-20K semantic segmentation: `finetune_ade20k_semseg.py` <br>
 
 (more will be issued later) <br>
 
