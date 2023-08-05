@@ -250,10 +250,6 @@ def prepare_data(args, prints=False):
 
 def main(args):
     device = torch.device(args.device)
-    cudnn.benchmark = True
-    misc.init_distributed_mode(args)
-    if args.ds_init is not None:
-        misc.create_ds_config(args)
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
@@ -347,14 +343,19 @@ def main(args):
     print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
     print("actual lr: %.2e" % args.lr)
     print("accumulate grad iterations: %d" % args.accum_iter)
-    print("effective batch size: %d\n" % eff_batch_size)
+    print("effective batch size: %d" % eff_batch_size)
 
     # start training
-    print(f"Start training for {args.epochs} epochs")
+    print(f"[Start training for {args.epochs} epochs]")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)
+        
+        log_file = os.path.join(args.output_dir, "train_log.log")
+        with open(log_file, 'a') as f:
+                print(f"[Epoch {epoch}]", file=f)    
+        
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
@@ -367,15 +368,15 @@ def main(args):
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
         
-        test_stats = evaluate_pt(data_loader_val, model, device, epoch=epoch, global_rank=global_rank, args=args)
-        print(f"Val loss of the network on the {len(dataset_val)} test images: {test_stats['loss']:.3f}")
+        # test_stats = evaluate_pt(data_loader_val, model, device, epoch=epoch, global_rank=global_rank, args=args)
+        # print(f"Val loss of the network on the {len(dataset_val)} test images: {test_stats['loss']:.3f}")
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'test_{k}': v for k, v in test_stats.items()},
+                        # **{f'test_{k}': v for k, v in test_stats.items()},
                         'epoch': epoch,}
         if output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
-            with open(os.path.join(output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
+            with open(os.path.join(output_dir, "epoch_log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
     total_time = time.time() - start_time
@@ -389,9 +390,13 @@ def main(args):
  # finetine_code = {0: freeze after cr, 1: freeze after xcr, 2: freeze after decoder, 3: no freeze, 4: LoRA}
 if __name__ == '__main__':
     args = get_args_parser()
+    cudnn.benchmark = True
+    misc.init_distributed_mode(args)
+    if args.ds_init is not None:
+        misc.create_ds_config(args)
     
     num_prompts_choices = [1] # [1, 2, 3]
-    cr_depth_choices = [12] # [6, 12, 18]
+    cr_depth_choices = [12, 15, 18] # [6, 9, 12, 15, 18]
     xcr_depth_choices = [15] # [12, 15, 18]
     finetune_choices = [1] # [0, 1, 2, 3]
     for finetune_code in finetune_choices:

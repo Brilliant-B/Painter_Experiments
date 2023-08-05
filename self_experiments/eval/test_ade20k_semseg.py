@@ -421,23 +421,23 @@ def hyper_param_test(args):
 
 
 def finetune_test(args, info):
-    random.seed(2)
-    num_val = 100
+    random.seed(0)
+    num_val = 50
 
     # original painter
-    # print("Anchor Test: (Painter)")
-    # args.dataset_root = "datasets/"
-    # args.use_cr_bank = False
-    # args.xcr_depth = 24
-    # args.cr_depth = 0
-    # args.num_prompts = 1
-    # random.seed(0)
-    # contexts = random.sample(PROMPTS_BANK, k = 10)[:args.num_prompts]
-    # test_step(args, contexts, num_val)
+    print("Anchor Test: (Painter)")
+    args.dataset_root = "datasets/"
+    args.use_cr_bank = False
+    args.xcr_depth = 24
+    args.cr_depth = 0
+    args.num_prompts = 1
+    random.seed(0)
+    contexts = random.sample(PROMPTS_BANK, k = 10)[:args.num_prompts]
+    test_step(args, contexts, num_val)
     
     # finetuned painter_variant_1
     print("Finetuned Model Test Started")
-    args.dataset_root = "toy_datasets/"
+    args.dataset_root = "datasets/"
     args.use_cr_bank = True
     args.xcr_depth = info["xcr_depth"]
     args.cr_depth = info["cr_depth"]
@@ -457,7 +457,8 @@ if __name__ == '__main__':
     # hyper_param_test(args)
     info_dict = {
         "num_prompts": 1,
-        "cr_depth": 12,
+        "cr_depth": 9,
         "xcr_depth": 15,
+        "ckpt_path": "",
     }
     finetune_test(args, info_dict)

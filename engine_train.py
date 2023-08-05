@@ -93,7 +93,7 @@ def train_one_epoch(model: torch.nn.Module,
             log_writer.add_scalar('lr', lr, epoch_1000x)
 
             with open(log_file, 'a') as f:
-                print(f"loss: {loss_value_reduce}, lr: {lr}, loss_scale: {loss_scale_value}, grad_norm: {grad_norm}", file=f)
+                print(f"loss: {loss_value_reduce},\tlr: {lr},\tloss_scale: {loss_scale_value},\tgrad_norm: {grad_norm}", file=f)
 
             if global_rank == 0 and args.log_wandb:
                 wandb.log({'train_loss': loss_value_reduce, 'lr': lr, 'train_loss_scale': loss_scale_value, 'grad_norm': grad_norm})
@@ -123,6 +123,7 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
     # switch to evaluation mode
     model.eval()
     wandb_images = []
+    model.use_cr_bank = True
     for prompts, query, target, mask, valid in metric_logger.log_every(data_loader, 50, header):
         prompts = prompts.to(device, non_blocking=True)
         query = query.to(device, non_blocking=True)
@@ -142,7 +143,8 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
             frame = torch.cat((x, msk_label, y, label), dim=2)[0]
             frame = torch.clip((frame * imagenet_std + imagenet_mean) * 255, 0, 255).int()
             wandb_images.append(wandb.Image(frame.numpy(), caption="query; masked_label; pred; label"))
-
+    model.use_cr_bank = False
+    
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print('Val loss {losses.global_avg:.3f}'.format(losses=metric_logger.loss))

@@ -11,7 +11,7 @@ for installation & data preparation & pretrained preparation, please refer to [O
 The modified Painter model is in the directory `$Painter_ROOT/models/` <br>
 - **Painter Variant 2**: `painter_variant_2.py` <br>
   add cr_banks and some other modifications
-- Painter Variant 1: `painter_variant_2.py` <br>
+- Painter Variant 1: `painter_variant_1.py` <br>
   add controls of num_contexts/cr_depth/xcr_depth
 - Painter Variant 0: `painter_variant_0.py` <br>
   change some of the code structure
