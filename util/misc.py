@@ -85,9 +85,10 @@ class SmoothedValue(object):
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\t", log_file=None):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
+        self.log_file = log_file
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
@@ -155,11 +156,24 @@ class MetricLogger(object):
                         meters=str(self),
                         time=str(iter_time), data=str(data_time),
                         memory=torch.cuda.max_memory_allocated() / MB))
+                    if self.log_file:
+                        with open(self.log_file, 'a') as f:
+                            print(log_msg.format(
+                                i, len(iterable), eta=eta_string,
+                                meters=str(self),
+                                time=str(iter_time), data=str(data_time),
+                                memory=torch.cuda.max_memory_allocated() / MB), file=f)
                 else:
                     print(log_msg.format(
                         i, len(iterable), eta=eta_string,
                         meters=str(self),
                         time=str(iter_time), data=str(data_time)))
+                    if self.log_file:
+                        with open(self.log_file, 'a') as f:
+                            print(log_msg.format(
+                                i, len(iterable), eta=eta_string,
+                                meters=str(self),
+                                time=str(iter_time), data=str(data_time)), file=f)
             i += 1
             end = time.time()
         total_time = time.time() - start_time

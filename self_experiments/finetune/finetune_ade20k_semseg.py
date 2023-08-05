@@ -350,12 +350,7 @@ def main(args):
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
-            data_loader_train.sampler.set_epoch(epoch)
-        
-        log_file = os.path.join(args.output_dir, "train_log.log")
-        with open(log_file, 'a') as f:
-                print(f"[Epoch {epoch}]", file=f)    
-        
+            data_loader_train.sampler.set_epoch(epoch)  
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,

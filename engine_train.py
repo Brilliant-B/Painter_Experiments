@@ -36,13 +36,14 @@ def train_one_epoch(model: torch.nn.Module,
     model.train(True)
     optimizer.zero_grad()
     
-    metric_logger = misc.MetricLogger(delimiter="  ")
+    log_file = os.path.join(args.output_dir, "train_log.log")
+    metric_logger = misc.MetricLogger(delimiter="  ", log_file=log_file)
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 20
     accum_iter = args.accum_iter
     if log_writer is not None:
-        print('log_dir: {}'.format(log_writer.log_dir))
+        print('tensorboard_log_dir: {}'.format(log_writer.log_dir))
 
     wandb_images = []
     for data_iter_step, (prompts, query, target, mask, valid) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
@@ -81,7 +82,7 @@ def train_one_epoch(model: torch.nn.Module,
         metric_logger.update(lr=lr)
         metric_logger.update(loss_scale=loss_scale_value)
         metric_logger.update(grad_norm=grad_norm)
-        log_file = os.path.join(args.output_dir, "train_log.log")
+        
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:
@@ -91,9 +92,6 @@ def train_one_epoch(model: torch.nn.Module,
             epoch_1000x = int((data_iter_step / len(data_loader) + epoch) * 1000)
             log_writer.add_scalar('train_loss', loss_value_reduce, epoch_1000x)
             log_writer.add_scalar('lr', lr, epoch_1000x)
-
-            with open(log_file, 'a') as f:
-                print(f"loss: {loss_value_reduce},\tlr: {lr},\tloss_scale: {loss_scale_value},\tgrad_norm: {grad_norm}", file=f)
 
             if global_rank == 0 and args.log_wandb:
                 wandb.log({'train_loss': loss_value_reduce, 'lr': lr, 'train_loss_scale': loss_scale_value, 'grad_norm': grad_norm})
