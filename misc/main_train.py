@@ -31,7 +31,7 @@ from util.pos_embed import interpolate_pos_embed
 
 import models.models_painter as models_painter
 
-from engine_train import train_one_epoch, evaluate_pt
+from self_experiments.finetune.engine_train import train_one_epoch, evaluate_pt
 
 from data.pairdataset import PairDataset
 import data.pair_transforms as pair_transforms

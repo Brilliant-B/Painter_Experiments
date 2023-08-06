@@ -3,12 +3,10 @@
 set -x
 
 NUM_GPUS=1
-JOB_NAME="painter_vit_large"
-CKPT_FILE="painter_vit_large.pth"
 
 SIZE=448
-MODEL_NAME="painter_varient_2"
-CKPT_PATH="pretrained/${JOB_NAME}/${CKPT_FILE}"
+MODEL_NAME="painter_variant_2"
+CKPT_PATH="pretrained/painter_vit_large/painter_vit_large.pth"
 OUTPUT_DIR="workbench/eval_${MODEL_NAME}"
 
 # inference and post_evaluation

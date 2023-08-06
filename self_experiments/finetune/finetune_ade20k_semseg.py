@@ -31,7 +31,7 @@ from data.sampler import DistributedSamplerWrapper
 import wandb
 
 import models.painter_variant_2 as painter_variant_2
-from engine_train import train_one_epoch, evaluate_pt
+from self_experiments.finetune.engine_train import train_one_epoch, evaluate_pt
 
 
 def get_args_parser():
@@ -42,8 +42,9 @@ def get_args_parser():
     parser.add_argument('--accum_iter', default=16, type=int,
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
     # Model parameters
+    parser.add_argument('--model_name', default='painter_varient_1', type=str, help='Name of model to train')
     parser.add_argument('--model', default='painter_varient_1_patch16_win_dec64_8glb_sl1', type=str, metavar='MODEL',
-                        help='Name of model to train')
+                        help='Full-Name of model to train')
     parser.add_argument('--img_size', default=448, type=int, nargs='+',
                         help='images input size')
     parser.add_argument('--mask_ratio', default=0.5, type=float,
@@ -192,8 +193,8 @@ def prepare_model(args, prints=False):
         finetune_code, freeze_list = args.finetune_code, []
         if finetune_code < 3:
             freeze_list.append("decoder*")
-            code2layers = [model.cr_depth, model.xcr_depth, model.depth]
-            for l in range(model.depth):
+            code2layers = [model.cr_depth, model.xcr_depth]
+            for l in range(model.xcr_depth):
                 if l >= code2layers[finetune_code]:
                     freeze_list.append(f"blocks.{l}.*")
         # print(freeze_list)
@@ -203,9 +204,9 @@ def prepare_model(args, prints=False):
                 ret = ret or (re.search(n, name) is not None)
             return ret
         for (name, param) in model.named_parameters():
-            if freeze_match(name, freeze_list):
-                param.requires_grad = False
-                # print(name)
+            param.requires_grad = not freeze_match(name, freeze_list)
+            if prints:
+                print(name, param.requires_grad)
     return model
 
 
@@ -376,7 +377,7 @@ def main(args):
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Done! Training time {}'.format(total_time_str))
+    print('Done! Training time {}\n'.format(total_time_str))
 
     if global_rank == 0 and args.log_wandb:
         wandb.finish()
@@ -390,14 +391,16 @@ if __name__ == '__main__':
     if args.ds_init is not None:
         misc.create_ds_config(args)
     
-    num_prompts_choices = [1] # [1, 2, 3]
-    cr_depth_choices = [12, 15, 18] # [6, 9, 12, 15, 18]
-    xcr_depth_choices = [15] # [12, 15, 18]
-    finetune_choices = [1] # [0, 1, 2, 3]
+    num_prompts_choices = [1, 2] # [3, 4]
+    cr_depth_choices = [9] # [9, 12]
+    xcr_depth_choices = [12] # [12, 15]
+    finetune_choices = [1, 2] # [1, 2, 3]
     for finetune_code in finetune_choices:
         for num_prompts in num_prompts_choices:
             for cr_depth in cr_depth_choices:
                 for xcr_depth in xcr_depth_choices:
+                    if cr_depth > xcr_depth:
+                        continue
                     args.num_prompts = num_prompts
                     args.cr_depth = cr_depth
                     args.xcr_depth = xcr_depth

@@ -23,6 +23,7 @@ import glob
 import tqdm
 import time
 import random
+import re
 
 try:
     np.int
@@ -40,9 +41,10 @@ from util import ddp_utils
 from util.pos_embed import interpolate_rel_pos_embed
 import models.painter_variant_2 as painter_variant_2
 
-
 imagenet_mean = np.array([0.485, 0.456, 0.406])
 imagenet_std = np.array([0.229, 0.224, 0.225])
+PROMPTS_BANK = glob.glob(os.path.join("datasets/ade20k/images/training", "*.jpg"))
+
 
 def get_args_parser():
     # basic inference parameters
@@ -213,7 +215,7 @@ def run_one_image(prompts, query, img_size, model, device):
     output= pred.detach().cpu()
     output = torch.clip((output * imagenet_std + imagenet_mean) * 255, 0, 255)
     output = F.interpolate(output.permute(0, 3, 1, 2), size=img_size[::-1],
-        mode='bilinear').permute(0, 2, 3, 1)[0]
+        mode='bilinear').permute(0, 2, 3, 1)
     assert output.shape[-1] == 3
     output = output.int()
     return output
@@ -232,7 +234,7 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
     xcr_depth = args.xcr_depth
     
     model = f"{model_name}_patch16_win_dec64_8glb_sl1"
-    dst_dir = os.path.join(output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth__ade20k_{}_semseg_inference".format(
+    dst_dir = os.path.join(output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth__ade20k_{}_semseg_inference/pred_images".format(
         num_prompts, cr_depth, xcr_depth, img_size))
 
     if ddp_utils.get_rank() == 0:
@@ -278,7 +280,7 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
         model_painter.eval()
         for data in tqdm.tqdm(data_loader_val):
             """ Load an image """
-            assert len(data) == 1
+            # assert len(data) == 1
             img, img_path, size = data[0]
             img_name = os.path.basename(img_path)
             out_path = os.path.join(dst_dir, img_name.replace('.jpg', '.png'))
@@ -287,14 +289,29 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
             assert query.shape == (1, img_size, img_size, 3)
             output = run_one_image(prompts, query, size, model_painter, device)
             if not warm_up:
-                output = Image.fromarray(output.numpy().astype(np.uint8))
-                output.save(out_path)
+                for r in range(output.shape[0]):
+                    out_img = Image.fromarray(output[r].numpy().astype(np.uint8))
+                    out_img.save(out_path)
         T1 = time.perf_counter()
         TIME = T1 - T0
         
         copy_paste_results['time'] = TIME
         if args.test_flops:
             copy_paste_results['flops'] = flops
+        if not args.eval and not warm_up:
+            if not args.use_cr_bank:
+                print("Without CR-Bank:", file=f)
+            print(copy_paste_results)
+            print("")
+            result_file = os.path.join(dst_dir, "metrics.txt")
+            with open(result_file, 'a') as f:
+                if not args.use_cr_bank:
+                    print("Without CR-Bank:", file=f)
+                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}:", file=f)
+                print(copy_paste_results, file=f)
+                print("", file=f)
+            
+            
     
     if args.eval and not warm_up:
         from data.ade20k.gen_color_ade20k_sem import define_colors_per_location_mean_sep
@@ -322,10 +339,14 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
         
         for key in ['mIoU', 'fwIoU', 'mACC', 'pACC']:
             copy_paste_results[key] = results['sem_seg'][key]
+        if not args.use_cr_bank:
+            print("Without CR-Bank:", file=f)
         print(copy_paste_results)
-        
+        print("")
         result_file = os.path.join(output_dir, "metrics.txt")
         with open(result_file, 'a') as f:
+            if not args.use_cr_bank:
+                print("Without CR-Bank:", file=f)
             print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}:", file=f)
             print(copy_paste_results, file=f)
             print("", file=f)
@@ -333,45 +354,51 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
     return None if warm_up else copy_paste_results
 
 
-def graphing(anchor, metrics, output_dir):
+def graphing(anchor, metrics, output_dir, num_val):
     # graph the main metrics statistics: miou, time
     for metric in metrics.keys():
-        plt.figure(figsize=(50, 30), dpi=100)
+        plt.figure(figsize=(30, 20), dpi=100)
         plt.style.use('fivethirtyeight')
         adata, data = anchor[metric], metrics[metric]
-        x_labels = np.array(list(adata[2].keys())+list(data[2].keys()))
+        s = list(adata.keys())[0]
+        x_labels = np.array(list(adata[s].keys())+list(data[s].keys()))
         x_idx = np.arange(len(x_labels))
         y_idce = np.array([list(adata[p].values())+list(data[p].values()) for p in data.keys()])
-        n = y_idce.shape[0]
+        y_min, y_max = np.min(y_idce), np.max(y_idce)
+        plt.ylim(y_min-0.1*(y_max-y_min), y_max+0.1*(y_max-y_min))
+        n, w= y_idce.shape[0], 0.75
         for p in range(len(y_idce)):
-            bias_x_idx = x_idx + 0.9*0.5*(2*p-n+1)/n
-            plt.bar(bias_x_idx, y_idce[p], bottom=0, label=f"{p+1}-context", width=0.9/n)
+            bias_x_idx = x_idx + w*0.5*(2*p-n+1)/n
+            plt.bar(bias_x_idx, y_idce[p], bottom=0, label=f"{p+1}-context", width=w/n)
         # post_y_idce = 0
         # for p in range(len(y_idce)):
         #     plt.bar(x_idx, y_idce[p]-post_y_idce, bottom=post_y_idce, label=f"{p}-context", width=0.9)
         #     post_y_idce = y_idce[p]
-        plt.legend(loc='best')
-        plt.xticks(x_idx, labels=x_labels)
-        plt.yticks(np.linspace(0, np.max(y_idce).astype(np.int64)+2, 30))
+        plt.legend(loc='best', prop={'size': 30})
+        plt.rcParams.update({'font.size': 30})
+        plt.xticks(x_idx, labels=x_labels, fontsize=27)
+        plt.yticks(np.linspace(y_min-0.1*(y_max-y_min), y_max+0.1*(y_max-y_min), 20), fontsize=22)
         plt.grid(True, linestyle='--', alpha=0.5)
-        plt.xlabel("cr_depth ; xcr_depth", fontdict={'size': 25})
-        plt.ylabel(metric, fontdict={'size': 25})
-        plt.title(f"{metric.upper()} for Different n_prompts & cr_depth & xcr_depth", fontdict={'size': 30})
+        plt.xlabel("cr_depth ; xcr_depth", fontdict={'size': 30})
+        plt.ylabel(metric, fontdict={'size': 30})
+        plt.title(f"{metric.upper()} for Different n_prompts & cr_depth & xcr_depth (val {num_val})", fontdict={'size': 40})
         plt.tight_layout()
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
         plt.savefig(os.path.join(output_dir, f"metrics_{metric}.jpg"))
         plt.clf()
-
-
-PROMPTS_BANK = glob.glob(os.path.join("datasets/ade20k/images/training", "*.jpg"))
 
 
 def hyper_param_test(args):
     random.seed(0)
     contexts = random.sample(PROMPTS_BANK, k = 6)
-    num_prompts_choice = [1, 2, 3]
-    cr_depth_choice = [4, 5, 6]
-    xcr_depth_choice = [17, 16, 15, 14, 13, 12]
+    num_val = 100
+    
+    num_prompts_choice = [1]
+    cr_depth_choice = [9, 12]
+    xcr_depth_choice = [12, 15]
     anchor, metrics = dict(), dict()
+    args.use_cr_bank = True
     if args.eval:
         anchor['mIoU'] = {pr: dict() for pr in num_prompts_choice}
         metrics['mIoU'] = {pr: dict() for pr in num_prompts_choice}
@@ -381,73 +408,73 @@ def hyper_param_test(args):
         if args.test_flops:
             anchor['flops'] = {pr: dict() for pr in num_prompts_choice}
             metrics['flops'] = {pr: dict() for pr in num_prompts_choice}
+    # print("WARM-UP Started")
+    # args.dataset_root = "toy_datasets/"
+    # args.use_cr_bank = False
+    # args.xcr_depth = 18
+    # args.cr_depth = 0
+    # args.num_prompts = 3
+    # test_step(args, contexts[:args.num_prompts], warm_up=True)
+    # print("WARM-UP Done")
     
-    print("WARM-UP Started")
-    args.dataset_root = "toy_datasets/"
-    args.xcr_depth = 15
-    args.cr_depth = 12
-    args.num_prompts = 1
-    test_step(args, contexts[:args.num_prompts])
-    print("WARM-UP Done")
-    
+    args.dataset_root = "datasets/"
     print("Anchor Test: Original Painter Settings")
-    args.dataset_root = "datasets/"
-    args.xcr_depth = 24
-    args.cr_depth = 0
-    args.num_prompts = 1
-    anchor_results = test_step(args, contexts[:args.num_prompts], 2000)
-    for metric in anchor.keys():
-        anchor[metric][num_prompts]["0;24 Ori"] = anchor_results[metric]
-    for num_prompts in num_prompts_choice:
-        if num_prompts < 2:
-            for metric in anchor.keys():
-                anchor[metric][num_prompts]["0;24 Ori"] = 0.
-    print("Anchor Test Done")
-    
-    print("Hyper-Params Test started")
-    args.dataset_root = "datasets/"
-    for num_prompts in num_prompts_choice:
-        for cr_depth in cr_depth_choice:
-            for xcr_depth in xcr_depth_choice:
-                if cr_depth <= xcr_depth <= 24:
-                    args.xcr_depth = xcr_depth
-                    args.cr_depth = cr_depth
-                    args.num_prompts = num_prompts
-                    eval_results = test_step(args, contexts[:args.num_prompts], 2000)
-                    for metric in metrics.keys():
-                        metrics[metric][num_prompts][f"{cr_depth};{xcr_depth}"] = eval_results[metric]
-    print("Hyper-Params Test Done")
-    graphing(anchor, metrics, args.output_dir)
-
-
-def finetune_test(args, info):
-    random.seed(0)
-    num_val = 50
-
-    # original painter
-    print("Anchor Test: (Painter)")
-    args.dataset_root = "datasets/"
     args.use_cr_bank = False
     args.xcr_depth = 24
     args.cr_depth = 0
     args.num_prompts = 1
-    random.seed(0)
-    contexts = random.sample(PROMPTS_BANK, k = 10)[:args.num_prompts]
-    test_step(args, contexts, num_val)
+    anchor_results = test_step(args, contexts[:args.num_prompts], num_val)
+    for metric in anchor.keys():
+        anchor[metric][num_prompts]["Painter"] = anchor_results[metric]
+    for num_prompts in num_prompts_choice:
+        if num_prompts < 2:
+            for metric in anchor.keys():
+                anchor[metric][num_prompts]["Painter"] = 0.
+    print("Anchor Test Done")
     
-    # finetuned painter_variant_1
-    print("Finetuned Model Test Started")
+    print("Hyper-Params Test started")
+    for num_prompts in num_prompts_choice:
+        for cr_depth in cr_depth_choice:
+            for xcr_depth in xcr_depth_choice:
+                if cr_depth <= xcr_depth <= 24:
+                    args.use_cr_bank = True
+                    args.xcr_depth = xcr_depth
+                    args.cr_depth = cr_depth
+                    args.num_prompts = num_prompts
+                    eval_results = test_step(args, contexts[:args.num_prompts], num_val)
+                    for metric in metrics.keys():
+                        metrics[metric][num_prompts][f"{cr_depth};{xcr_depth}"] = eval_results[metric]
+    print("Hyper-Params Test Done")
+    graphing(anchor, metrics, args.output_dir, num_val)
+
+
+def finetune_test(args, info):
+    random.seed(0)
+    contexts = random.sample(PROMPTS_BANK, k = 10)
     args.dataset_root = "datasets/"
-    args.use_cr_bank = True
-    args.xcr_depth = info["xcr_depth"]
-    args.cr_depth = info["cr_depth"]
-    args.num_prompts = info["num_prompts"]
-    if "ckpt_path" in info.keys():
-        args.ckpt_path = info["ckpt_path"]
-    contexts = random.sample(PROMPTS_BANK, k = 10)[:args.num_prompts]
-    test_step(args, contexts, num_val)
-    # args.use_cr_bank = False
-    # test_step(args, contexts, num_val)
+    
+    # original painter
+    print("Anchor Test: (Painter)")
+    args.use_cr_bank = False
+    args.xcr_depth = 24
+    args.cr_depth = 0
+    args.num_prompts = 1
+    test_step(args, contexts[:args.num_prompts], info["num_val"])
+    
+    # finetuned painter variants
+    print("Finetuned Model Test Started")
+    for num_prompts in info["num_prompts_choices"]:
+        for cr_depth in info["cr_depth_choices"]:
+            for xcr_depth in info["xcr_depth_choices"]:  
+                args.use_cr_bank = True
+                args.xcr_depth = xcr_depth
+                args.cr_depth = cr_depth
+                args.num_prompts = num_prompts
+                args.ckpt_path = f"workbench/train_variant_3/{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_0_finetune_code/checkpoint-0.pth"
+                test_step(args, contexts[:args.num_prompts], info["num_val"])
+                if info["test_cr_bank"]:
+                    args.use_cr_bank = False
+                    test_step(args, contexts[:args.num_prompts], info["num_val"])
     print("Finetuned Model Test Done")
 
 
@@ -455,10 +482,12 @@ if __name__ == '__main__':
     args = get_args_parser()
     args = ddp_utils.init_distributed_mode(args)
     # hyper_param_test(args)
-    info_dict = {
-        "num_prompts": 1,
-        "cr_depth": 9,
-        "xcr_depth": 15,
-        "ckpt_path": "",
+          
+    info = {
+        "num_prompts_choices": [1],
+        "cr_depth_choices": [12],
+        "xcr_depth_choices": [24, 22, 20],
+        "num_val": 100,
+        "test_cr_bank": True,
     }
-    finetune_test(args, info_dict)
+    finetune_test(args, info)

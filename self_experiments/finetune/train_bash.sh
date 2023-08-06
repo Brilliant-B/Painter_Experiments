@@ -7,9 +7,10 @@ python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12
 	--use_env self_experiments/finetune/finetune_ade20k_semseg.py \
     --batch_size 2 \
     --accum_iter 16  \
-    --model painter_varient_2_patch16_win_dec64_8glb_sl1 \
+    --model_name $name \
+    --model ${name}_patch16_win_dec64_8glb_sl1 \
     --max_mask_patches_per_block 392 \
-    --epochs 2 \
+    --epochs 3 \
     --warmup_epochs 1 \
     --lr 1e-3 \
     --clip_grad 3 \

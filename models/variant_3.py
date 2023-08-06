@@ -208,7 +208,7 @@ class Block(nn.Module):
         return x
 
 
-class Painter_Varient(nn.Module):
+class Varient(nn.Module):
     """ Masked Autoencoder with VisionTransformer backbone
     """
     def __init__(
@@ -217,13 +217,14 @@ class Painter_Varient(nn.Module):
             patch_size=16,
             in_chans=3,
             embed_dim=1024,
-            depth=24,
             num_heads=16,
-            merge_layer=3,
+            
             num_prompts=1,
             cr_depth=12,
-            xcr_depth=2,
+            xcr_depth=24,
             use_cr_bank=True,
+            
+            merge_layer=3,
             mlp_ratio=4.,
             qkv_bias=True,
             drop_path_rate=0.,
@@ -249,7 +250,6 @@ class Painter_Varient(nn.Module):
         self.ori_window_size = (img_size[0] // patch_size, img_size[1] // patch_size)
         self.pretrain_use_cls_token = pretrain_use_cls_token
         self.patch_size = patch_size
-        self.depth = depth
         self.patch_embed = PatchEmbed(
             kernel_size=(patch_size, patch_size),
             stride=(patch_size, patch_size),
@@ -258,12 +258,14 @@ class Painter_Varient(nn.Module):
         )
         self.patch_embed.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
         self.loss_func = loss_func
+        
         self.merge_layer= merge_layer
-        self.encoder_sampling = set([5, 11, 17, 23])
+        self.encoder_sampling = set([xcr_depth//4-1, xcr_depth//2-1, xcr_depth*3//4-1, xcr_depth-1])
+        
         self.num_prompts = num_prompts
         self.cr_depth = cr_depth
         self.xcr_depth = xcr_depth
-        assert self.cr_depth <= self.xcr_depth <= self.depth
+        assert self.cr_depth <= self.xcr_depth <= 24
         
         self.use_cr_bank = use_cr_bank
         if self.use_cr_bank:
@@ -283,16 +285,14 @@ class Painter_Varient(nn.Module):
             self.pos_embed = None
 
         # stochastic depth decay rule
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]
+        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.xcr_depth)]
 
         self.blocks = nn.ModuleList()
-        for i in range(self.depth):
+        for i in range(self.xcr_depth):
             if i < self.cr_depth:
                 input_size = self.ori_window_size
-            elif i < self.xcr_depth:
-                input_size = ((self.num_prompts + 1) * self.ori_window_size[0], self.ori_window_size[1])
             else:
-                input_size = (2 * self.ori_window_size[0], self.ori_window_size[1])
+                input_size = ((self.num_prompts + 1) * self.ori_window_size[0], self.ori_window_size[1])
             block = Block(
                 dim=embed_dim,
                 num_heads=num_heads,
@@ -383,10 +383,6 @@ class Painter_Varient(nn.Module):
                 elif self.use_cr_bank:
                     self.cr_bank = x[:, :, :-1] # (B, -1, num_prompts, Hp, Wp, C)
                 x = x.reshape(B, -1, 1, (self.num_prompts + 1) * Hp, Wp, C)
-            if idx == self.xcr_depth:
-                x = x.reshape(B, -1, self.num_prompts + 1, Hp, Wp, C)
-                p, y = x.split((self.num_prompts, 1), dim=2)
-                x = torch.cat([torch.mean(p, dim=2, keepdim=True), y], dim=2)
             
             ori_shape = x.shape
             x = x.reshape(-1, *(blk.input_size), C)
@@ -459,9 +455,9 @@ class Painter_Varient(nn.Module):
         return loss, pred, image_mask
 
 
-def painter_variant_2_patch16_win_dec64_8glb_sl1(**kwargs):
-    model = Painter_Varient(
-        img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
+def variant_3_patch16_win_dec64_8glb_sl1(**kwargs):
+    model = Varient(
+        img_size=(448, 448), patch_size=16, embed_dim=1024, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6),
         window_block_indexes=(list(range(0, 2)) + list(range(3, 5)) + list(range(6, 8)) + list(range(9, 11)) + \
