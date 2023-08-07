@@ -391,7 +391,7 @@ if __name__ == '__main__':
     if args.ds_init is not None:
         misc.create_ds_config(args)
     
-    num_prompts_choices = [3, 4, 5] # [3, 4]
+    num_prompts_choices = [2] # [3, 4, 5]
     cr_depth_choices = [9] # [9, 12]
     xcr_depth_choices = [12] # [12, 15]
     finetune_choices = [1]

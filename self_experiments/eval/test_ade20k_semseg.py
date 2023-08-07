@@ -228,7 +228,7 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
     cr_depth = args.cr_depth
     xcr_depth = args.xcr_depth
     finetune_code = args.finetune_code
-    batch_size = 2
+    batch_size = 1
     
     model = f"{model_name}_patch16_win_dec64_8glb_sl1"
     dst_dir = os.path.join(output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth__ade20k_{}_semseg_inference/pred_images".format(
@@ -488,7 +488,7 @@ if __name__ == '__main__':
     args = get_args_parser()
     args = ddp_utils.init_distributed_mode(args)
     # hyper_param_test(args)
-          
+    
     info = {
         "num_prompts_choices": [3, 4, 5],
         "cr_depth_choices": [9],
