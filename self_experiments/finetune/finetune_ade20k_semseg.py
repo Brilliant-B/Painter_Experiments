@@ -193,8 +193,8 @@ def prepare_model(args, prints=False):
         finetune_code, freeze_list = args.finetune_code, []
         if finetune_code < 3:
             freeze_list.append("decoder*")
-            code2layers = [model.cr_depth, model.xcr_depth]
-            for l in range(model.xcr_depth):
+            code2layers = [model.cr_depth, model.xcr_depth, model.depth]
+            for l in range(model.depth):
                 if l >= code2layers[finetune_code]:
                     freeze_list.append(f"blocks.{l}.*")
         # print(freeze_list)
@@ -391,10 +391,10 @@ if __name__ == '__main__':
     if args.ds_init is not None:
         misc.create_ds_config(args)
     
-    num_prompts_choices = [1, 2] # [3, 4]
+    num_prompts_choices = [3, 4, 5] # [3, 4]
     cr_depth_choices = [9] # [9, 12]
     xcr_depth_choices = [12] # [12, 15]
-    finetune_choices = [1, 2] # [1, 2, 3]
+    finetune_choices = [1]
     for finetune_code in finetune_choices:
         for num_prompts in num_prompts_choices:
             for cr_depth in cr_depth_choices:

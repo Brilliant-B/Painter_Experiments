@@ -222,7 +222,7 @@ class Painter_Varient(nn.Module):
             merge_layer=3,
             num_prompts=1,
             cr_depth=12,
-            xcr_depth=2,
+            xcr_depth=12,
             use_cr_bank=True,
             mlp_ratio=4.,
             qkv_bias=True,
@@ -347,6 +347,10 @@ class Painter_Varient(nn.Module):
         return {'pos_embed', 'cls_token'}
 
     def forward_encoder(self, prompts, query, target, mask):
+        # print(prompts.shape)
+        # print(query.shape, target.shape)
+        # print(mask.shape)
+        
         qi = self.patch_embed(query.permute(0, 3, 1, 2)) + self.segment_token_x
         qt = self.patch_embed(target.permute(0, 3, 1, 2)) + self.segment_token_y
         B, Hp, Wp, C = qt.shape

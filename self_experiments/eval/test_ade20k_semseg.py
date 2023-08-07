@@ -162,7 +162,7 @@ class SemSegEvaluatorCustom(SemSegEvaluator):
 
 def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1', args=None, prints=True):
     # build model
-    print(f'n_contexts: {args.num_prompts}, cr-depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}')
+    print(f"[Hyper] n_context={args.num_prompts}, cr_depth={args.cr_depth}, xcr_depth={args.xcr_depth}, finetune={args.finetune_code}:")
     model = getattr(painter_variant_2, arch)(
         num_prompts=args.num_prompts, 
         cr_depth=args.cr_depth, 
@@ -198,11 +198,9 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     return model, None if not args.test_flops else flops
 
 
-def run_one_image(prompts, query, img_size, model, device):
-    target = torch.zeros_like(query)
-    mask = torch.ones(model.module.ori_window_size).unsqueeze(0)
-    valid = torch.ones_like(target)
+def run_one_image(prompts, query, target, mask, model, device):
     # valid for ade20k
+    valid = torch.ones_like(target)
     imagenet_mean = torch.tensor([0.485, 0.456, 0.406])
     imagenet_std = torch.tensor([0.229, 0.224, 0.225])
     thres = torch.ones(3) * (1e-5) # ignore black
@@ -214,10 +212,7 @@ def run_one_image(prompts, query, img_size, model, device):
                        mask.float().to(device), valid.float().to(device))
     output= pred.detach().cpu()
     output = torch.clip((output * imagenet_std + imagenet_mean) * 255, 0, 255)
-    output = F.interpolate(output.permute(0, 3, 1, 2), size=img_size[::-1],
-        mode='bilinear').permute(0, 2, 3, 1)
     assert output.shape[-1] == 3
-    output = output.int()
     return output
 
 
@@ -232,6 +227,8 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
     num_prompts = args.num_prompts
     cr_depth = args.cr_depth
     xcr_depth = args.xcr_depth
+    finetune_code = args.finetune_code
+    batch_size = 2
     
     model = f"{model_name}_patch16_win_dec64_8glb_sl1"
     dst_dir = os.path.join(output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth__ade20k_{}_semseg_inference/pred_images".format(
@@ -255,7 +252,7 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
         # img_path_list = glob.glob(os.path.join(img_src_dir, "*.jpg"))
         dataset_val = DatasetTest(img_src_dir, img_size, num_val, ext_list=('*.jpg',))
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
-        data_loader_val = DataLoader(dataset_val, batch_size=1, sampler=sampler_val,
+        data_loader_val = DataLoader(dataset_val, batch_size=batch_size, sampler=sampler_val,
                                     drop_last=False, collate_fn=ddp_utils.collate_fn, num_workers=2)
 
         imgp_paths = [f"datasets/ade20k/images/training/{os.path.splitext(os.path.split(context)[-1])[0]}.jpg" for context in contexts]
@@ -273,25 +270,33 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
             prompt = torch.stack([imgp, tgtp], dim=0)
             prompt = (prompt - imagenet_mean) / imagenet_std
             prompts.append(prompt)
-        prompts = torch.stack(prompts, dim=1).unsqueeze(0)
-        assert prompts.shape == (1, 2, num_prompts, img_size, img_size, 3)
+        prompts = torch.stack(prompts, dim=1).repeat(batch_size, 1, 1, 1, 1, 1)
+        assert prompts.shape == (batch_size, 2, num_prompts, img_size, img_size, 3)
         
         T0 = time.perf_counter()
         model_painter.eval()
         for data in tqdm.tqdm(data_loader_val):
             """ Load an image """
-            # assert len(data) == 1
-            img, img_path, size = data[0]
-            img_name = os.path.basename(img_path)
-            out_path = os.path.join(dst_dir, img_name.replace('.jpg', '.png'))
-            query = torch.from_numpy(img).unsqueeze(0)
-            query = (query - imagenet_mean) / imagenet_std
-            assert query.shape == (1, img_size, img_size, 3)
-            output = run_one_image(prompts, query, size, model_painter, device)
+            assert batch_size == len(data)
+            query, sizes, out_paths = [], [], []
+            for unit_data in data:
+                img, img_path, size = unit_data
+                img_name = os.path.basename(img_path)
+                out_path = os.path.join(dst_dir, img_name.replace('.jpg', '.png'))
+                out_paths.append(out_path)
+                query.append((torch.from_numpy(img).unsqueeze(0) - imagenet_mean) / imagenet_std)
+                sizes.append(size)
+            query = torch.cat(query, dim=0)
+            assert query.shape == (batch_size, img_size, img_size, 3)
+            target = torch.zeros_like(query)
+            mask = torch.ones(model_painter.module.ori_window_size).repeat(batch_size, 1, 1)
+            output = run_one_image(prompts, query, target, mask, model_painter, device)
             if not warm_up:
                 for r in range(output.shape[0]):
-                    out_img = Image.fromarray(output[r].numpy().astype(np.uint8))
-                    out_img.save(out_path)
+                    out = F.interpolate(output[r:r+1].permute(0, 3, 1, 2), size=sizes[r][::-1], mode='bilinear').permute(0, 2, 3, 1)
+                    out = out.squeeze(0).int()
+                    out_img = Image.fromarray(out.numpy().astype(np.uint8))
+                    out_img.save(out_paths[r])
         T1 = time.perf_counter()
         TIME = T1 - T0
         
@@ -300,18 +305,16 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
             copy_paste_results['flops'] = flops
         if not args.eval and not warm_up:
             if not args.use_cr_bank:
-                print("Without CR-Bank:", file=f)
+                print("Without CR-Bank:")
             print(copy_paste_results)
             print("")
             result_file = os.path.join(dst_dir, "metrics.txt")
             with open(result_file, 'a') as f:
                 if not args.use_cr_bank:
                     print("Without CR-Bank:", file=f)
-                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}:", file=f)
+                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, finetune={finetune_code}:", file=f)
                 print(copy_paste_results, file=f)
                 print("", file=f)
-            
-            
     
     if args.eval and not warm_up:
         from data.ade20k.gen_color_ade20k_sem import define_colors_per_location_mean_sep
@@ -340,14 +343,14 @@ def test_step(args, contexts, num_val=2000, warm_up=False):
         for key in ['mIoU', 'fwIoU', 'mACC', 'pACC']:
             copy_paste_results[key] = results['sem_seg'][key]
         if not args.use_cr_bank:
-            print("Without CR-Bank:", file=f)
+            print("Without CR-Bank:")
         print(copy_paste_results)
         print("")
         result_file = os.path.join(output_dir, "metrics.txt")
         with open(result_file, 'a') as f:
             if not args.use_cr_bank:
                 print("Without CR-Bank:", file=f)
-            print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}:", file=f)
+            print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, finetune={finetune_code}:", file=f)
             print(copy_paste_results, file=f)
             print("", file=f)
 
@@ -459,22 +462,25 @@ def finetune_test(args, info):
     args.xcr_depth = 24
     args.cr_depth = 0
     args.num_prompts = 1
+    args.finetune_code = -1
     test_step(args, contexts[:args.num_prompts], info["num_val"])
     
     # finetuned painter variants
     print("Finetuned Model Test Started")
-    for num_prompts in info["num_prompts_choices"]:
-        for cr_depth in info["cr_depth_choices"]:
-            for xcr_depth in info["xcr_depth_choices"]:  
-                args.use_cr_bank = True
-                args.xcr_depth = xcr_depth
-                args.cr_depth = cr_depth
-                args.num_prompts = num_prompts
-                args.ckpt_path = f"workbench/train_variant_3/{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_0_finetune_code/checkpoint-0.pth"
-                test_step(args, contexts[:args.num_prompts], info["num_val"])
-                if info["test_cr_bank"]:
-                    args.use_cr_bank = False
+    for finetune_code in info["finetune_choices"]:
+        for num_prompts in info["num_prompts_choices"]:
+            for cr_depth in info["cr_depth_choices"]:
+                for xcr_depth in info["xcr_depth_choices"]:  
+                    args.use_cr_bank = True
+                    args.xcr_depth = xcr_depth
+                    args.cr_depth = cr_depth
+                    args.num_prompts = num_prompts
+                    args.finetune_code = finetune_code
+                    args.ckpt_path = f"workbench/train_painter_variant_2/{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{finetune_code}_finetune_code/checkpoint-0.pth"
                     test_step(args, contexts[:args.num_prompts], info["num_val"])
+                    if info["test_cr_bank"]:
+                        args.use_cr_bank = False
+                        test_step(args, contexts[:args.num_prompts], info["num_val"])
     print("Finetuned Model Test Done")
 
 
@@ -484,9 +490,10 @@ if __name__ == '__main__':
     # hyper_param_test(args)
           
     info = {
-        "num_prompts_choices": [1],
-        "cr_depth_choices": [12],
-        "xcr_depth_choices": [24, 22, 20],
+        "num_prompts_choices": [3, 4, 5],
+        "cr_depth_choices": [9],
+        "xcr_depth_choices": [12],
+        "finetune_choices": [1],
         "num_val": 100,
         "test_cr_bank": True,
     }

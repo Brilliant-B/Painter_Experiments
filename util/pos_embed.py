@@ -105,7 +105,7 @@ def interpolate_rel_pos_embed(model, checkpoint):
         param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
         checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
             param, size=(model.num_prompts * 56 + 55), mode='linear')[0].permute(1, 0)
-    # for i in range(model.xcr_depth, 24):
-    #     param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
-    #     checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
-    #         param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)
+    for i in range(model.xcr_depth, 24):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)
