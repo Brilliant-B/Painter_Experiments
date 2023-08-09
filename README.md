@@ -23,15 +23,19 @@ The modified Painter model is in the directory `$Painter_ROOT/models/` <br>
 The model will be trained, mostly finetuned, based on pretrained checkpoints under multiple hyper-parameters. <br>
 For new model training experiments, check the directory `self_experiments/finetune` <br>
 You can modify and run `train_bash.sh` <br>
-- Finetune for ADE-20K semantic segmentation: `finetune_ade20k_semseg.py` <br>
+- Multi-datasets Training PORTAL: `multi_finetune_portal.py` <br>
+  - Modify it in the bash. What's more, you can choose to use joint-dataset or seperate-dataset training. <br>
+- Hyper-parameter Testing: Finetune for ADE-20K semantic segmentation: `finetune_ade20k_semseg.py` <br>
 
 (more will be issued later) <br>
 
 
 ## Evaluation
 For new model evaluation experiments, check the directory `$Painter_ROOT/self_experiments/eval` <br>
-You can modify and run `eval_bash.sh`
-- Evaluation for ADE-20K semantic segmentation: `test_ade20k_semseg.py` <br>
+You can modify and run `eval_bash.sh` <br>
+- Multi-datasets Evaluation PORTAL: `multi_test_portal.py` <br>
+  - Modify it in the script, where datasets are evaluated in sequence and overall metrics are generated <br>
+- Hyper-parameter Testing: Evaluation for ADE-20K semantic segmentation: `test_ade20k_semseg.py` <br>
 
 (more will be issued later) <br>
 

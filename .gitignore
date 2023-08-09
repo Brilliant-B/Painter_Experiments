@@ -5,6 +5,7 @@ pretrained/
 models_inference/
 workbench/
 wandb
+temp.py
 .idea
 
 .nfs*

@@ -11,7 +11,6 @@ import os.path
 import json
 from typing import Any, Callable, List, Optional, Tuple
 import random
-
 from PIL import Image
 import numpy as np
 
@@ -22,9 +21,9 @@ from torchvision.datasets.vision import VisionDataset, StandardTransform
 class PairDataset(VisionDataset):
     def __init__(
         self,
-        args,
         root: str,
         json_path_list: list,
+        args = None,
         transform: Optional[Callable] = None,
         transform2: Optional[Callable] = None,
         transform3: Optional[Callable] = None,
@@ -33,6 +32,7 @@ class PairDataset(VisionDataset):
         transforms: Optional[Callable] = None,
         masked_position_generator: Optional[Callable] = None,
         mask_ratio:float = 1.,
+        seed = None,
     ) -> None:
         super().__init__(root, transforms, transform, target_transform)
         self.pairs = []
@@ -55,18 +55,21 @@ class PairDataset(VisionDataset):
         for t in self.pair_type_dict:
             print(t, len(self.pair_type_dict[t]))
         
+        self.seed = seed
         self.transforms = PairStandardTransform(transform, target_transform) if transform is not None else None
         self.transforms2 = PairStandardTransform(transform2, target_transform) if transform2 is not None else None
         self.transforms3 = PairStandardTransform(transform3, target_transform) if transform3 is not None else None
         self.transforms_seccrop = PairStandardTransform(transform_seccrop, target_transform) if transform_seccrop is not None else None
         self.masked_position_generator = masked_position_generator
-        self.mask_ratio = mask_ratio
+        if masked_position_generator is not None:
+            self.mask_ratio = mask_ratio
+            self.ori_window_size = self.masked_position_generator.get_shape()
         
-        self.num_prompts = args.num_prompts
-        self.cr_depth = args.cr_depth
-        self.xcr_depth = args.xcr_depth
-        self.img_size = args.img_size
-        self.ori_window_size = self.masked_position_generator.get_shape()
+        if args is not None:
+            self.img_size = args.img_size
+            self.num_prompts = args.num_prompts
+            self.cr_depth = args.cr_depth
+            self.xcr_depth = args.xcr_depth
 
     def _load_image(self, path: str) -> Image.Image:
         while True:
@@ -87,38 +90,29 @@ class PairDataset(VisionDataset):
         img = img.convert("RGB")
         return img
 
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        pair = self.pairs[index]
-        # decide mode for interpolation
-        pair_type = pair['type']
-        if "depth" in pair_type or "pose" in pair_type:
+    def get_k_type(self, type: str, k: int):
+        if "depth" in type or "pose" in type:
             interpolation1 = 'bicubic'
             interpolation2 = 'bicubic'
-        elif "image2" in pair_type:
+        elif "image2" in type:
             interpolation1 = 'bicubic'
             interpolation2 = 'nearest'
-        elif "2image" in pair_type:
+        elif "2image" in type:
             interpolation1 = 'nearest'
             interpolation2 = 'bicubic'
         else:
             interpolation1 = 'bicubic'
             interpolation2 = 'bicubic'
         # no aug for instance segmentation
-        if "inst" in pair['type'] and self.transforms2 is not None:
+        if "inst" in type and self.transforms2 is not None:
             cur_transforms = self.transforms2
-        elif "pose" in pair['type'] and self.transforms3 is not None:
+        elif "pose" in type and self.transforms3 is not None:
             cur_transforms = self.transforms3
         else:
             cur_transforms = self.transforms
-        query = self._load_image(pair['image_path'])
-        target = self._load_image(pair['target_path'])
-        query, target = cur_transforms(query, target, interpolation1, interpolation2)
-        query, target = torch.einsum('chw->hwc', query), torch.einsum('chw->hwc', target)
-        assert query.shape == target.shape == (*self.img_size, 3)
-        
         # randomly sample the prompt-pairs belonging to the same type
-        pair_type = pair['type']
-        prompt_pairs_index = random.choices(self.pair_type_dict[pair_type], k=self.num_prompts)
+        if self.seed is not None:   random.seed(self.seed)
+        prompt_pairs_index = random.choices(self.pair_type_dict[type], k=k)
         prompt_pairs = [self.pairs[idx] for idx in prompt_pairs_index]
         image_prompts = [self._load_image(pair['image_path']) for pair in prompt_pairs]
         target_prompts = [self._load_image(pair['target_path']) for pair in prompt_pairs]
@@ -131,11 +125,26 @@ class PairDataset(VisionDataset):
         tgt_p = torch.stack(target_pt, dim=0)
         prompts = torch.stack([img_p, tgt_p], dim=0)
         prompts = torch.einsum('mnchw->mnhwc', prompts)
+        return prompts, cur_transforms, (interpolation1, interpolation2)
+    
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        pair = self.pairs[index]
+        # decide mode for interpolation
+        pair_type = pair['type']
+        prompts, cur_transforms, interpolations= self.get_k_type(pair_type, self.num_prompts)
         assert prompts.shape == (2, self.num_prompts, *self.img_size, 3)
         
+        query = self._load_image(pair['image_path'])
+        target = self._load_image(pair['target_path'])
+        query, target = cur_transforms(query, target, interpolations[0], interpolations[1])
+        query, target = torch.einsum('chw->hwc', query), torch.einsum('chw->hwc', target)
+        assert query.shape == target.shape == (*self.img_size, 3)
+        
         # get mask for target training
-        mask = torch.rand(self.masked_position_generator.get_shape()) <= self.mask_ratio
-        assert mask.shape == self.ori_window_size
+        if self.masked_position_generator is not None:
+            mask = torch.rand(self.masked_position_generator.get_shape()) <= self.mask_ratio
+            assert mask.shape == self.ori_window_size
+        else:   mask = None
         
         # get valid output pixels standards for each tasks
         valid = torch.ones_like(target)

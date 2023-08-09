@@ -347,10 +347,6 @@ class Painter_Varient(nn.Module):
         return {'pos_embed', 'cls_token'}
 
     def forward_encoder(self, prompts, query, target, mask):
-        # print(prompts.shape)
-        # print(query.shape, target.shape)
-        # print(mask.shape)
-        
         qi = self.patch_embed(query.permute(0, 3, 1, 2)) + self.segment_token_x
         qt = self.patch_embed(target.permute(0, 3, 1, 2)) + self.segment_token_y
         B, Hp, Wp, C = qt.shape
@@ -457,6 +453,10 @@ class Painter_Varient(nn.Module):
         return Loss, image_mask
 
     def forward(self, prompts, query, target, mask, valid):
+        # print(prompts.shape) # (B, 2, NC, H, W, 3)
+        # print(query.shape, target.shape) # (B, H, W, 3)
+        # print(mask.shape) # (B, Hp, Wp)
+        # print(valid.shape) # (B, H, W, 3)
         latent = self.forward_encoder(prompts, query, target, mask)
         pred = self.forward_decoder(latent)
         loss, image_mask = self.forward_loss(pred, target, mask, valid)

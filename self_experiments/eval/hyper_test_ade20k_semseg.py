@@ -1,12 +1,3 @@
-# --------------------------------------------------------
-# Images Speak in Images: A Generalist Painter for In-Context Visual Learning (https://arxiv.org/abs/2212.02499)
-# Github source: https://github.com/baaivision/Painter
-# Copyright (c) 2022 Beijing Academy of Artificial Intelligence (BAAI)
-# Licensed under The MIT License [see LICENSE for details]
-# By Xinlong Wang, Wen Wang
-# Based on MAE, BEiT, detectron2, Mask2Former, bts, mmcv, mmdetetection, mmpose, MIRNet, MPRNet, and Uformer codebases
-# --------------------------------------------------------'
-
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1,"
 import sys

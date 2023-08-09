@@ -31,53 +31,42 @@ from data.sampler import DistributedSamplerWrapper
 import wandb
 
 import models.painter_variant_2 as painter_variant_2
-from self_experiments.finetune.engine_train import train_one_epoch, evaluate_pt
+from self_experiments.finetune.engine_train import train_one_epoch
+
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Painter_Variant_2 fine-tuning', add_help=False)
-    parser.add_argument('--batch_size', default=2, type=int,
+    parser.add_argument('--batch_size', default=2, type=int, 
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=15, type=int)
-    parser.add_argument('--accum_iter', default=16, type=int,
+    parser.add_argument('--accum_iter', default=16, type=int, 
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
     # Model parameters
     parser.add_argument('--model_name', default='painter_varient_1', type=str, help='Name of model to train')
     parser.add_argument('--model', default='painter_varient_1_patch16_win_dec64_8glb_sl1', type=str, metavar='MODEL',
                         help='Full-Name of model to train')
-    parser.add_argument('--img_size', default=448, type=int, nargs='+',
-                        help='images input size')
-    parser.add_argument('--mask_ratio', default=0.5, type=float,
-                        help='Masking ratio (percentage of removed patches).')
-    parser.add_argument('--norm_pix_loss', action='store_true',
-                        help='Use (per-patch) normalized pixels as targets for computing loss')
+    parser.add_argument('--img_size', default=448, type=int, nargs='+', help='images input size')
+    parser.add_argument('--mask_ratio', default=0.5, type=float, help='Masking ratio (percentage of removed patches).')
+    parser.add_argument('--norm_pix_loss', action='store_true', help='Use (per-patch) normalized pixels as targets for computing loss')
     parser.set_defaults(norm_pix_loss=False)
-    parser.add_argument('--num_mask_patches', default=784, type=int,
-                        help='number of the visual tokens/patches need be masked')
+    parser.add_argument('--num_mask_patches', default=784, type=int, help='number of the visual tokens/patches need be masked')
     parser.add_argument('--max_mask_patches_per_block', type=int, default=None)
     parser.add_argument('--min_mask_patches_per_block', type=int, default=16)
-    parser.add_argument('--stop_grad_patch_embed', action='store_true',
-                        help='stop-grad after first conv, or patch embedding')
+    parser.add_argument('--stop_grad_patch_embed', action='store_true', help='stop-grad after first conv, or patch embedding')
     parser.set_defaults(stop_grad_patch_embed=False)
-    parser.add_argument('--finetune', default='',
-                        help='finetune from checkpoint')
-    parser.add_argument('--drop_path', default=0., type=float,
-                        help='Drop path rate (default: 0.)')
-    parser.add_argument('--min_random_scale', default=0.3, type=float,
-                        help='Minimal random scale for randomresizecrop (default: 0.3)')
+    parser.add_argument('--finetune', default='', help='finetune from checkpoint')
+    parser.add_argument('--drop_path', default=0., type=float, help='Drop path rate (default: 0.)')
+    parser.add_argument('--min_random_scale', default=0.3, type=float, help='Minimal random scale for randomresizecrop (default: 0.3)')
     parser.add_argument('--last_norm_instance', action='store_true', default=False,
-                    help='use instance norm to normalize each channel map before the decoder layer')
-    parser.add_argument('--half_mask_ratio', default=0.1, type=float,
-                        help='ratio of using half mask during training (default: 0.1)')
-    parser.add_argument('--use_checkpoint', action='store_true', default=False,
-                    help='use checkpoint to save GPU memory')
+                        help='use instance norm to normalize each channel map before the decoder layer')
+    parser.add_argument('--half_mask_ratio', default=0.1, type=float, help='ratio of using half mask during training (default: 0.1)')
+    parser.add_argument('--use_checkpoint', action='store_true', default=False, help='use checkpoint to save GPU memory')
 
 
     # Optimizer parameters
-    parser.add_argument('--weight_decay', type=float, default=0.1,
-                        help='weight decay (default: 0.1)')
-    parser.add_argument('--lr', type=float, default=None, metavar='LR',
-                        help='learning rate (absolute lr)')
+    parser.add_argument('--weight_decay', type=float, default=0.1, help='weight decay (default: 0.1)')
+    parser.add_argument('--lr', type=float, default=None, metavar='LR', help='learning rate (absolute lr)')
     parser.add_argument('--blr', type=float, default=1e-3, metavar='LR',
                         help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
     parser.add_argument('--min_lr', type=float, default=0., metavar='LR',
@@ -152,6 +141,7 @@ def get_args_parser():
     return args
 
 
+
 def prepare_model(args, prints=False):
     # get model with args
     model = painter_variant_2.__dict__[args.model](
@@ -210,6 +200,7 @@ def prepare_model(args, prints=False):
     return model
 
 
+
 def prepare_data(args, prints=False):
     transform_train = pair_transforms.Compose([
             pair_transforms.RandomResizedCrop(args.img_size[1], scale=(args.min_random_scale, 1.0), interpolation=3),  # 3 is bicubic
@@ -238,15 +229,16 @@ def prepare_data(args, prints=False):
         max_num_patches=args.max_mask_patches_per_block,
         min_num_patches=args.min_mask_patches_per_block,
     )
-    dataset_train = PairDataset(args, args.data_path, args.json_path, transform=transform_train, transform2=transform_train2, 
+    dataset_train = PairDataset(args.data_path, args.json_path, args=args, transform=transform_train, transform2=transform_train2, 
                                 transform3=transform_train3, transform_seccrop=transform_train_seccrop, 
                                 masked_position_generator=masked_position_generator, mask_ratio=args.mask_ratio)
-    dataset_val = PairDataset(args, args.data_path, args.val_json_path, transform=transform_val, transform2=None, transform3=None, 
+    dataset_val = PairDataset(args.data_path, args.val_json_path, args=args, transform=transform_val, transform2=None, transform3=None, 
                               masked_position_generator=masked_position_generator, mask_ratio=1.)
     if prints:
         print(dataset_train)
         print(dataset_val)
     return dataset_train, dataset_val
+
 
 
 def main(args):
@@ -255,15 +247,16 @@ def main(args):
     torch.manual_seed(seed)
     np.random.seed(seed)
     
+    mix_data = "Joint" if args.joint_datasets else "Seperate"
     output_dir = args.output_dir = os.path.join(args.base_output_dir, \
-        f"{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code")
+        f"{mix_data}_{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print('output_dir: {}'.format(output_dir))
     print('job_dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     
     # define the model
     print("[Prepare Model]")
-    print(f"num_contexts: {args.num_prompts}, cr_depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}, finetune_mode: {args.finetune_code}")
+    print(f"@{mix_data} Data @ num_contexts: {args.num_prompts}, cr_depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}, finetune_mode: {args.finetune_code}")
     model = prepare_model(args)
     args.patch_size = patch_size = model.patch_size
     args.window_size = (args.img_size[0] // patch_size, args.img_size[1] // patch_size)
@@ -303,7 +296,7 @@ def main(args):
     num_samples_train = len(dataset_train)
     weights_train = dataset_train.weights
     sampler_train = torch.utils.data.WeightedRandomSampler(weights_train, num_samples_train, replacement=True)
-    sampler_train = DistributedSamplerWrapper(sampler_train, num_replicas=num_tasks, rank=global_rank, shuffle=True)
+    sampler_train = DistributedSamplerWrapper(sampler_train, num_replicas=num_tasks, rank=global_rank, shuffle=args.joint_datasets)
     # print("Sampler_train = %s" % str(sampler_train))
     sampler_val = torch.utils.data.DistributedSampler(dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
     data_loader_train = torch.utils.data.DataLoader(
@@ -364,8 +357,6 @@ def main(args):
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch)
         
-        # test_stats = evaluate_pt(data_loader_val, model, device, epoch=epoch, global_rank=global_rank, args=args)
-        # print(f"Val loss of the network on the {len(dataset_val)} test images: {test_stats['loss']:.3f}")
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         # **{f'test_{k}': v for k, v in test_stats.items()},
                         'epoch': epoch,}
@@ -383,6 +374,7 @@ def main(args):
         wandb.finish()
 
 
+
  # finetine_code = {0: freeze after cr, 1: freeze after xcr, 2: freeze after decoder, 3: no freeze, 4: LoRA}
 if __name__ == '__main__':
     args = get_args_parser()
@@ -391,19 +383,9 @@ if __name__ == '__main__':
     if args.ds_init is not None:
         misc.create_ds_config(args)
     
-    num_prompts_choices = [2] # [3, 4, 5]
-    cr_depth_choices = [9] # [9, 12]
-    xcr_depth_choices = [12] # [12, 15]
-    finetune_choices = [1]
-    for finetune_code in finetune_choices:
-        for num_prompts in num_prompts_choices:
-            for cr_depth in cr_depth_choices:
-                for xcr_depth in xcr_depth_choices:
-                    if cr_depth > xcr_depth:
-                        continue
-                    args.num_prompts = num_prompts
-                    args.cr_depth = cr_depth
-                    args.xcr_depth = xcr_depth
-                    args.finetune_code = finetune_code
-                    main(args)
-    
+    args.joint_datasets = True
+    args.num_prompts = 2
+    args.cr_depth = 9
+    args.xcr_depth = 12
+    args.finetune_code = 1
+    main(args)

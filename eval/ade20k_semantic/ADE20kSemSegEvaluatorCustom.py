@@ -53,15 +53,12 @@ class SemSegEvaluatorCustom(SemSegEvaluator):
             distributed=distributed,
             output_dir=output_dir,
         )
-
         # update source names
-        print(len(self.input_file_to_gt_file))
         self.input_file_to_gt_file_custom = {}
         for src_file, tgt_file in self.input_file_to_gt_file.items():
             assert os.path.basename(src_file).replace('.jpg', '.png') == os.path.basename(tgt_file)
             src_file_custom = os.path.join(pred_dir, os.path.basename(tgt_file))  # output is saved as png
             self.input_file_to_gt_file_custom[src_file_custom] = tgt_file
-
         color_to_idx = {}
         for cls_idx, color in enumerate(palette):
             color = tuple(color)
@@ -82,44 +79,34 @@ class SemSegEvaluatorCustom(SemSegEvaluator):
                 (Tensor [H, W]) or list of dicts with key "sem_seg" that contains semantic
                 segmentation prediction in the same format.
         """
-        print("processing")
+        # print("processing")
         for input in tqdm.tqdm(inputs):
             # output = output["sem_seg"].argmax(dim=0).to(self._cpu_device)  # chw --> hw
             output = input["file_name"]
-            output = Image.open(output)
-            output = np.array(output)  # (h, w, 3)
-            pred = self.post_process_segm_output(output)
+            output = np.array(Image.open(output)) # (H, W, 3)
+            pred = self.post_process_segm_output(output) # (H, W)
             # use custom input_file_to_gt_file mapping
             gt_filename = self.input_file_to_gt_file_custom[input["file_name"]]
             gt = self.sem_seg_loading_fn(gt_filename, dtype=np.int)
-
-            gt[gt == self._ignore_label] = self._num_classes
-
+            gt[gt==self._ignore_label] = self._num_classes
             self._conf_matrix += np.bincount(
                 (self._num_classes + 1) * pred.reshape(-1) + gt.reshape(-1),
                 minlength=self._conf_matrix.size,
             ).reshape(self._conf_matrix.shape)
-
             if self._compute_boundary_iou:
                 b_gt = self._mask_to_boundary(gt.astype(np.uint8))
                 b_pred = self._mask_to_boundary(pred.astype(np.uint8))
-
                 self._b_conf_matrix += np.bincount(
                     (self._num_classes + 1) * b_pred.reshape(-1) + b_gt.reshape(-1),
                     minlength=self._conf_matrix.size,
                 ).reshape(self._conf_matrix.shape)
-
             self._predictions.extend(self.encode_json_sem_seg(pred, input["file_name"]))
 
     def post_process_segm_output(self, segm):
         """
         Post-processing to turn output segm image to class index map
-
-        Args:
-            segm: (H, W, 3)
-
-        Returns:
-            class_map: (H, W)
+        Args: segm: (H, W, 3)
+        Returns: class_map: (H, W)
         """
         segm = torch.from_numpy(segm).float().to(self.palette.device)  # (h, w, 3)
         # pred = torch.einsum("hwc, kc -> hwk", segm, self.palette)  # (h, w, num_cls)
@@ -135,9 +122,8 @@ class SemSegEvaluatorCustom(SemSegEvaluator):
         else:
             raise NotImplementedError
         dist = torch.sum(dist, dim=-1)
-        pred = dist.argmin(dim=-1).cpu()  # (h, w)
+        pred = dist.argmin(dim=-1).cpu()  # (H, W)
         pred = np.array(pred, dtype=np.int)
-
         return pred
 
 
