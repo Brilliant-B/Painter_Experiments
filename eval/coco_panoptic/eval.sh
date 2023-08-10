@@ -17,15 +17,15 @@ MODEL="painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1"
 WORK_DIR="models_inference/${JOB_NAME}"
 
 # inference
-python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS --master_port=29504 --use_env \
- eval/coco_panoptic/painter_inference_pano_semseg.py \
- --ckpt_path ${CKPT_PATH} --model ${MODEL} --prompt ${sem_PROMPT} \
- --input_size ${SIZE}
+# python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS --master_port=29504 --use_env \
+#  eval/coco_panoptic/painter_inference_pano_semseg.py \
+#  --ckpt_path ${CKPT_PATH} --model ${MODEL} --prompt ${sem_PROMPT} \
+#  --input_size ${SIZE}
 
-python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS --master_port=29504 --use_env \
- eval/coco_panoptic/painter_inference_pano_inst.py \
- --ckpt_path ${CKPT_PATH} --model ${MODEL} --prompt ${ins_PROMPT} \
- --input_size ${SIZE}
+# python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS --master_port=29504 --use_env \
+#  eval/coco_panoptic/painter_inference_pano_inst.py \
+#  --ckpt_path ${CKPT_PATH} --model ${MODEL} --prompt ${ins_PROMPT} \
+#  --input_size ${SIZE}
 
 # postprocessing and eval
 # python \
@@ -33,7 +33,7 @@ python -m torch.distributed.launch --nproc_per_node=$NUM_GPUS --master_port=2950
 #   --work_dir ${WORK_DIR} --ckpt_file ${CKPT_FILE} \
 #   --dist_thr ${DIST_THR} --prompt ${PROMPT} --input_size ${SIZE}
 
-# python \
-#   eval/coco_panoptic/COCOPanoEvaluatorCustom.py \
-#   --work_dir ${WORK_DIR} --ckpt_file ${CKPT_FILE} \
-#   --dist_thr ${DIST_THR} --prompt ${PROMPT} --input_size ${SIZE}
+python \
+  eval/coco_panoptic/COCOPanoEvaluatorCustom.py \
+  --work_dir ${WORK_DIR} --ckpt_file ${CKPT_FILE} \
+  --dist_thr ${DIST_THR} --prompt ${PROMPT} --input_size ${SIZE}

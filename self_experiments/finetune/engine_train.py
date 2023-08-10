@@ -25,6 +25,7 @@ def get_loss_scale_for_deepspeed(model):
 
 
 def train_one_epoch(model: torch.nn.Module,
+                    model_without_ddp: torch.nn.Module,
                     data_loader: Iterable, 
                     optimizer: torch.optim.Optimizer,
                     device: torch.device, 
@@ -83,6 +84,10 @@ def train_one_epoch(model: torch.nn.Module,
         metric_logger.update(loss_scale=loss_scale_value)
         metric_logger.update(grad_norm=grad_norm)
         
+        if args.output_dir and (data_iter_step + 1 == len(data_loader) or (data_iter_step + 1) % args.save_itrs == 0 or epoch + 1 == args.epochs):
+            misc.save_model(
+                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                loss_scaler=loss_scaler, epoch=epoch, itr=data_iter_step+1)
 
         loss_value_reduce = misc.all_reduce_mean(loss_value)
         if log_writer is not None and (data_iter_step + 1) % accum_iter == 0:

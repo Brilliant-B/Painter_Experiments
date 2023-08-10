@@ -73,8 +73,8 @@ def get_args_parser():
                         help='lower lr bound for cyclic schedulers that hit 0')
     parser.add_argument('--warmup_epochs', type=int, default=40, metavar='N',
                         help='epochs to warmup LR')
-    parser.add_argument('--save_freq', type=int, default=100,
-                        help='save checkkpoints frequency')
+    parser.add_argument('--save_itrs', type=int, default=1000,
+                        help='save checkkpoints frequency iteration')
     parser.add_argument('--clip_grad', type=float, default=3.0, metavar='NORM',
                         help='Clip gradient norm (default: None, no clipping)')
     parser.add_argument('--opt_eps', default=1e-8, type=float, metavar='EPSILON',
@@ -256,7 +256,7 @@ def main(args):
     
     # define the model
     print("[Prepare Model]")
-    print(f"@{mix_data} Data @ num_contexts: {args.num_prompts}, cr_depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}, finetune_mode: {args.finetune_code}")
+    print(f"{mix_data} Data @ num_contexts: {args.num_prompts}, cr_depth: {args.cr_depth}, xcr_depth: {args.xcr_depth}, finetune_mode: {args.finetune_code}")
     model = prepare_model(args)
     args.patch_size = patch_size = model.patch_size
     args.window_size = (args.img_size[0] // patch_size, args.img_size[1] // patch_size)
@@ -346,17 +346,12 @@ def main(args):
         if args.distributed:
             data_loader_train.sampler.set_epoch(epoch)  
         train_stats = train_one_epoch(
-            model, data_loader_train,
+            model, model_without_ddp, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
             global_rank=global_rank,
-            args=args
+            args=args,
         )
-        if output_dir and (epoch % args.save_freq == 0 or epoch + 1 == args.epochs):
-            misc.save_model(
-                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
-                loss_scaler=loss_scaler, epoch=epoch)
-        
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                         # **{f'test_{k}': v for k, v in test_stats.items()},
                         'epoch': epoch,}
@@ -375,6 +370,29 @@ def main(args):
 
 
 
+TRAIN_JSON_BANK = {
+    "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
+    "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json",
+    "denoise": "denoise/denoise_ssid_train.json",
+    "derain": "derain/derain_train.json",
+    "light_enhance": "light_enhance/enhance_lol_train.json",
+    "nyu_depth_v2": "nyu_depth_v2/nyuv2_sync_image_depth.json",
+    "coco_pano_inst": "coco/pano_ca_inst/coco_train_image_panoptic_inst.json",
+    "coco_pose": "coco_pose/coco_pose_256x192_train.json",
+}
+
+VAL_JSON_BANK = {
+    "ade20k_image2semantic": "ade20k/ade20k_validation_image_semantic.json",
+    "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_val2017_image_panoptic_sem_seg.json",
+    "denoise": "denoise/denoise_ssid_val.json",
+    "derain": "derain/derain_test_rain100h.json",
+    "light_enhance": "light_enhance/enhance_lol_val.json",
+    "nyu_depth_v2": "nyu_depth_v2/nyuv2_test_image_depth.json",
+    "coco_pano_inst": "coco/pano_ca_inst/coco_val_image_panoptic_inst.json",
+    "coco_pose": "coco_pose/coco_pose_256x192_val.json",
+}
+
+
  # finetine_code = {0: freeze after cr, 1: freeze after xcr, 2: freeze after decoder, 3: no freeze, 4: LoRA}
 if __name__ == '__main__':
     args = get_args_parser()
@@ -383,9 +401,23 @@ if __name__ == '__main__':
     if args.ds_init is not None:
         misc.create_ds_config(args)
     
+    args.seed = 1
+    dataset_names = [
+        "ade20k_image2semantic",
+        "coco_image2panoptic_sem_seg",
+    ]
+    json_path, val_json_path = [], []
+    for dataset_name in dataset_names:
+        json_path.append(os.path.join(args.data_path, TRAIN_JSON_BANK[dataset_name]))
+        val_json_path.append(os.path.join(args.data_path, VAL_JSON_BANK[dataset_name]))
+    args.json_path, args.val_json_path = json_path, val_json_path
+    
+    args.save_itrs = 1000
     args.joint_datasets = True
+    
     args.num_prompts = 2
     args.cr_depth = 9
     args.xcr_depth = 12
     args.finetune_code = 1
+    
     main(args)

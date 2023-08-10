@@ -17,16 +17,10 @@ python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12
     --layer_decay 0.8 \
     --drop_path 0.1 \
     --img_size 448 448 \
-    --save_freq 1 \
     --data_path $DATA_PATH/ \
-    --json_path \
-    $DATA_PATH/ade20k/ade20k_training_image_semantic.json \
-    --val_json_path \
-    $DATA_PATH/ade20k/ade20k_validation_image_semantic.json \
     --base_output_dir workbench/train_$name \
     --log_dir workbench/train_$name/tensorboard_logs \
     --finetune pretrained/painter_vit_large/painter_vit_large.pth \
-
 
     # --json_path \
     # $DATA_PATH/nyu_depth_v2/nyuv2_sync_image_depth.json \
@@ -37,6 +31,7 @@ python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12
     # $DATA_PATH/denoise/denoise_ssid_train.json \
     # $DATA_PATH/derain/derain_train.json \
     # $DATA_PATH/light_enhance/enhance_lol_train.json \
+
     # --val_json_path \
     # $DATA_PATH/nyu_depth_v2/nyuv2_test_image_depth.json \
     # $DATA_PATH/ade20k/ade20k_validation_image_semantic.json \

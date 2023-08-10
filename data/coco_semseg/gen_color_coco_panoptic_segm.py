@@ -110,6 +110,9 @@ if __name__ == '__main__':
     for ann in tqdm.tqdm(coco_d['annotations']):
         # save the time for loading images
         # # find input img that correspond to the annotation
+        if not os.path.exists(os.path.join(segmentations_folder, ann['file_name'])):
+            continue
+        
         segmentation_org = np.array(
             load_image_with_retry(os.path.join(segmentations_folder, ann['file_name'])),
             dtype=np.uint8

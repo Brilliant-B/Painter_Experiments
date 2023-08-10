@@ -28,36 +28,81 @@ from util.ddp_utils import DatasetTest
 from util import ddp_utils
 
 from data.pairdataset_variant import PairDataset
-from eval.ade20k_semantic.ADE20kSemSegEvaluatorCustom import SemSegEvaluatorCustom
+
 from data.ade20k.gen_color_ade20k_sem import define_colors_per_location_mean_sep
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
 
 import models.painter_variant_2 as painter_variant
 
-imagenet_mean = np.array([0.485, 0.456, 0.406])
-imagenet_std = np.array([0.229, 0.224, 0.225])
 
-TRAIN_JSON_BANK = {
-    "nyu_depth_v2": "nyu_depth_v2/nyuv2_sync_image_depth.json",
-    "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
-    "coco_pano_inst": "coco/pano_ca_inst/coco_train_image_panoptic_inst.json",
-    "coco_pano_semseg": "coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json",
-    "coco_pose": "coco_pose/coco_pose_256x192_train.json",
-    "denoise": "denoise/denoise_ssid_train.json",
-    "derain": "derain/derain_train.json",
-    "light_enhance": "light_enhance/enhance_lol_train.json",
-}
 
-VAL_JSON_BANK = {
-    "nyu_depth_v2": "nyu_depth_v2/nyuv2_test_image_depth.json",
-    "ade20k_image2semantic": "ade20k/ade20k_validation_image_semantic.json",
-    "coco_pano_inst": "coco/pano_ca_inst/coco_val_image_panoptic_inst.json",
-    "coco_pano_semseg": "coco/pano_sem_seg/coco_val2017_image_panoptic_sem_seg.json",
-    "coco_pose": "coco_pose/coco_pose_256x192_val.json",
-    "denoise": "denoise/denoise_ssid_val.json",
-    "derain": "derain/derain_test_rain100h.json",
-    "light_enhance": "light_enhance/enhance_lol_val.json",
-}
+def eval_coco_pano_semseg(metric_results, args, verbose=False):
+    from eval.coco_panoptic.COCOPanoSemSegEvaluatorCustom import SemSegEvaluatorCustom
+    from data.coco_semseg.gen_color_coco_panoptic_segm import define_colors_by_mean_sep
+    
+    # load categories info
+    panoptic_coco_categories = 'data/panoptic_coco_categories.json'
+    with open(panoptic_coco_categories, 'r') as f:
+        categories_list = json.load(f)
+    categories = {category['id']: category for category in categories_list}
+    
+    # define colors (dict of cat_id to color mapper)
+    PALETTE_DICT = define_colors_by_mean_sep(num_colors=len(categories))
+    PALETTE = [v for k, v in PALETTE_DICT.items()]
+    dataset_name = 'coco_2017_val_panoptic_with_sem_seg' # 
+    evaluator = SemSegEvaluatorCustom(
+        dataset_name,
+        distributed=True,
+        output_dir=args.output_dir,
+        palette=PALETTE,
+        pred_dir=args.dst_dir,
+        dist_type=args.dist_type,
+    )
+    prediction_list = glob.glob(os.path.join(args.dst_dir, "*.png"))
+    if verbose: print(f"loading predictions: {len(prediction_list)}")
+    inputs, outputs = [], []
+    for file_name in prediction_list:
+        inputs.append({"file_name": file_name})
+        outputs.append({"sem_seg": file_name})
+
+    evaluator.reset()
+    evaluator.process(inputs, outputs)
+    results = evaluator.evaluate()
+
+    if verbose: print(results)
+    for key in ['mIoU', 'fwIoU', 'mACC', 'pACC']:
+        metric_results[key] = results['sem_seg'][key]
+    return metric_results
+
+
+
+def eval_ade20k_semseg(metric_results, args, verbose=False):
+    from eval.ade20k_semantic.ADE20kSemSegEvaluatorCustom import SemSegEvaluatorCustom
+    PALETTE = define_colors_per_location_mean_sep()
+    dataset_name = 'ade20k_sem_seg_val'
+    evaluator = SemSegEvaluatorCustom(
+        dataset_name,
+        distributed=True,
+        output_dir=args.output_dir,
+        palette=PALETTE,
+        pred_dir=args.dst_dir,
+        dist_type=args.dist_type,
+    )
+    prediction_list = glob.glob(os.path.join(args.dst_dir, "*.png"))
+    if verbose: print(f"loading predictions: {len(prediction_list)}")
+    inputs, outputs = [], []
+    for file_name in prediction_list:
+        inputs.append({"file_name": file_name})
+        outputs.append({"sem_seg": file_name})
+    
+    evaluator.reset()
+    evaluator.process(inputs, outputs)
+    results = evaluator.evaluate()
+
+    if verbose: print(results)
+    for key in ['mIoU', 'fwIoU', 'mACC', 'pACC']:
+        metric_results[key] = results['sem_seg'][key]    
+    return metric_results
 
 
 
@@ -157,8 +202,7 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
     
     model = f"{model_name}_patch16_win_dec64_8glb_sl1"
     args.dst_dir = dst_dir = os.path.join(
-        output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth__ade20k_{}_semseg_inference/pred_images".format(
-            num_prompts, cr_depth, xcr_depth, img_size)
+        output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth/{}".format(num_prompts, cr_depth, xcr_depth, args.dataset_name)
     )
     if ddp_utils.get_rank() == 0:
         if not warm_up and not os.path.exists(dst_dir): os.makedirs(dst_dir)
@@ -173,7 +217,7 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
         model_painter.to(device)
         
         if dataset_dir == "toy_datasets/":  args.num_val = None
-        img_src_dir = dataset_dir + "ade20k/images/validation"
+        img_src_dir = dataset_dir + VAL_PATH[dataset_name]
         dataset_val = DatasetTest(img_src_dir, img_size, args.num_val, ext_list=('*.jpg',))
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
         data_loader_val = DataLoader(dataset_val, batch_size=batch_size, sampler=sampler_val,
@@ -233,15 +277,15 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
                     print("Without CR-Bank:", file=f)
                 print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:")
                 print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:", file=f)
-                print(metric_results, "\n")
-                print(metric_results, "\n", file=f)
+                print(json.dumps(metric_results, indent=4), "\n")
+                print(json.dumps(metric_results, indent=4), "\n", file=f)
 
     # Evaluation Processing
     if args.eval and not warm_up:
         if dataset_name == "ade20k_image2semantic":
             metric_results = eval_ade20k_semseg(metric_results, args, verbose)
-        else:
-            pass
+        elif dataset_name == "coco_image2panoptic_sem_seg":
+            metric_results = eval_coco_pano_semseg(metric_results, args, verbose)
         
         result_file = os.path.join(output_dir, "metrics.txt")
         if not warm_up:
@@ -251,38 +295,10 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
                     print("Without CR-Bank:", file=f)
                 print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:")
                 print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:", file=f)
-                print(metric_results, "\n")
-                print(metric_results, "\n", file=f)
+                print(json.dumps(metric_results, indent=4), "\n")
+                print(json.dumps(metric_results, indent=4), "\n", file=f)
 
     return None if warm_up else metric_results
-
-
-
-def eval_ade20k_semseg(metric_results, args, verbose):
-    PALETTE = define_colors_per_location_mean_sep()
-    dataset_name = 'ade20k_sem_seg_val'
-    evaluator = SemSegEvaluatorCustom(
-        dataset_name,
-        distributed=True,
-        output_dir=args.output_dir,
-        palette=PALETTE,
-        pred_dir=args.dst_dir,
-        dist_type=args.dist_type,
-    )
-    prediction_list = glob.glob(os.path.join(args.dst_dir, "*.png"))
-    if verbose: print(f"loading predictions: {len(prediction_list)}")
-    inputs, outputs = [], []
-    for file_name in prediction_list:
-        inputs.append({"file_name": file_name})
-        outputs.append({"sem_seg": file_name})
-    
-    evaluator.reset()
-    evaluator.process(inputs, outputs)
-    results = evaluator.evaluate()
-
-    for key in ['mIoU', 'fwIoU', 'mACC', 'pACC']:
-        metric_results[key] = results['sem_seg'][key]    
-    return metric_results
 
 
 
@@ -300,6 +316,25 @@ def get_context_set(args, dataset_names):
 
 
 
+imagenet_mean = np.array([0.485, 0.456, 0.406])
+imagenet_std = np.array([0.229, 0.224, 0.225])
+
+TRAIN_JSON_BANK = {
+    "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
+    "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json",
+    "denoise": "denoise/denoise_ssid_train.json",
+    "derain": "derain/derain_train.json",
+    "light_enhance": "light_enhance/enhance_lol_train.json",
+    "nyu_depth_v2": "nyu_depth_v2/nyuv2_sync_image_depth.json",
+    "coco_pano_inst": "coco/pano_ca_inst/coco_train_image_panoptic_inst.json",
+    "coco_pose": "coco_pose/coco_pose_256x192_train.json",
+}
+
+VAL_PATH = {
+    "ade20k_image2semantic": "ade20k/images/validation",
+    "coco_image2panoptic_sem_seg": "coco/val2017",
+}
+
 if __name__ == '__main__':
     args = get_args_parser()
     args = ddp_utils.init_distributed_mode(args)
@@ -307,8 +342,7 @@ if __name__ == '__main__':
     args.seed = 0
     dataset_names = [
         "ade20k_image2semantic",
-        # "coco_pano_inst",
-        # "coco_pano_semseg",
+        "coco_image2panoptic_sem_seg",
     ]
     contexts = get_context_set(args, dataset_names)
     
@@ -318,17 +352,19 @@ if __name__ == '__main__':
     args.xcr_depth = 24
     args.finetune_code = None
     args.use_cr_bank = False
-    args.num_val = 100
+    args.num_val = 10
     anchor = {name: dict() for name in dataset_names}
     for dataset_name in dataset_names:
         args.dataset_name = dataset_name
         d_context = contexts[dataset_name][:args.num_prompts]
-        results = test_one_dataset(args, d_context, verbose=True)
+        results = test_one_dataset(args, d_context)
         for key in results.keys():
             anchor[dataset_name][key] = results[key]
-    print(json.dumps(anchor, sort_keys=False, indent=4))
+    print("Anchor Results:")
+    print(json.dumps(anchor, sort_keys=False, indent=4), "\n\n")
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
-        print(json.dumps(anchor, sort_keys=False, indent=4), file=f)
+        print("Anchor Results:", file=f)
+        print(json.dumps(anchor, sort_keys=False, indent=4), "\n\n", file=f)
     print("Anchor Test Done!\n")
     
     print("Main Test Started:")
@@ -337,21 +373,24 @@ if __name__ == '__main__':
     args.xcr_depth = 12
     args.finetune_code = 1
     args.use_cr_bank = True
-    args.num_val = 100
-    args.ckpt_path = os.path.join(
-        f"workbench/train_{args.model_name}", \
-        f"{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code", \
-        "1000.pth"
-    )
+    args.num_val = 10
+    args.ckpt_path = "pretrained/painter_vit_large/painter_vit_large.pth"
+    # args.ckpt_path = os.path.join(
+    #     f"workbench/train_{args.model_name}", \
+    #     f"{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code", \
+    #     "1000.pth"
+    # )
     metrics = {name: dict() for name in dataset_names}
     for dataset_name in dataset_names:
         args.dataset_name = dataset_name
         d_context = contexts[dataset_name][:args.num_prompts]
-        results = test_one_dataset(args, d_context, verbose=True)
+        results = test_one_dataset(args, d_context)
         for key in results.keys():
             metrics[dataset_name][key] = results[key]
     
-    print(json.dumps(metrics, sort_keys=False, indent=4))
+    print("Main Results:")
+    print(json.dumps(anchor, sort_keys=False, indent=4), "\n\n")
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
-        print(json.dumps(metrics, sort_keys=False, indent=4), file=f)
+        print("Main Results:", file=f)
+        print(json.dumps(anchor, sort_keys=False, indent=4), "\n\n", file=f)
     print("Main Test Done!\n")

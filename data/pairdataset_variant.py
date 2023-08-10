@@ -91,31 +91,39 @@ class PairDataset(VisionDataset):
         return img
 
     def get_k_type(self, type: str, k: int):
-        if "depth" in type or "pose" in type:
+        # randomly sample the prompt-pairs belonging to the same type
+        # if self.seed is not None:   random.seed(self.seed)
+        prompt_pairs_index = random.choices(self.pair_type_dict[type], k=k)
+        prompt_pairs = [self.pairs[idx] for idx in prompt_pairs_index]
+        # print(prompt_pairs)
+        image_prompts = [self._load_image(pair['image_path']) for pair in prompt_pairs]
+        target_prompts = [self._load_image(pair['target_path']) for pair in prompt_pairs]
+        return image_prompts, target_prompts
+    
+    def __getitem__(self, index: int) -> Tuple[Any, Any]:
+        pair = self.pairs[index]
+        pair_type = pair['type']
+        if "depth" in pair_type or "pose" in pair_type:
             interpolation1 = 'bicubic'
             interpolation2 = 'bicubic'
-        elif "image2" in type:
+        elif "image2" in pair_type:
             interpolation1 = 'bicubic'
             interpolation2 = 'nearest'
-        elif "2image" in type:
+        elif "2image" in pair_type:
             interpolation1 = 'nearest'
             interpolation2 = 'bicubic'
         else:
             interpolation1 = 'bicubic'
             interpolation2 = 'bicubic'
         # no aug for instance segmentation
-        if "inst" in type and self.transforms2 is not None:
+        if "inst" in pair_type and self.transforms2 is not None:
             cur_transforms = self.transforms2
-        elif "pose" in type and self.transforms3 is not None:
+        elif "pose" in pair_type and self.transforms3 is not None:
             cur_transforms = self.transforms3
         else:
             cur_transforms = self.transforms
-        # randomly sample the prompt-pairs belonging to the same type
-        if self.seed is not None:   random.seed(self.seed)
-        prompt_pairs_index = random.choices(self.pair_type_dict[type], k=k)
-        prompt_pairs = [self.pairs[idx] for idx in prompt_pairs_index]
-        image_prompts = [self._load_image(pair['image_path']) for pair in prompt_pairs]
-        target_prompts = [self._load_image(pair['target_path']) for pair in prompt_pairs]
+        
+        image_prompts, target_prompts = self.get_k_type(pair_type, self.num_prompts)
         image_pt, target_pt = [], []
         for image_p, target_p in zip(image_prompts, target_prompts):
             transformed = cur_transforms(image_p, target_p, interpolation1, interpolation2)
@@ -125,18 +133,11 @@ class PairDataset(VisionDataset):
         tgt_p = torch.stack(target_pt, dim=0)
         prompts = torch.stack([img_p, tgt_p], dim=0)
         prompts = torch.einsum('mnchw->mnhwc', prompts)
-        return prompts, cur_transforms, (interpolation1, interpolation2)
-    
-    def __getitem__(self, index: int) -> Tuple[Any, Any]:
-        pair = self.pairs[index]
-        # decide mode for interpolation
-        pair_type = pair['type']
-        prompts, cur_transforms, interpolations= self.get_k_type(pair_type, self.num_prompts)
-        assert prompts.shape == (2, self.num_prompts, *self.img_size, 3)
-        
+        assert prompts.shape == (2, self.num_prompts, *self.img_size, 3)        
+        # print(pair)
         query = self._load_image(pair['image_path'])
         target = self._load_image(pair['target_path'])
-        query, target = cur_transforms(query, target, interpolations[0], interpolations[1])
+        query, target = cur_transforms(query, target, interpolation1, interpolation2)
         query, target = torch.einsum('chw->hwc', query), torch.einsum('chw->hwc', target)
         assert query.shape == target.shape == (*self.img_size, 3)
         

@@ -24,7 +24,7 @@ The model will be trained, mostly finetuned, based on pretrained checkpoints und
 For new model training experiments, check the directory `self_experiments/finetune` <br>
 You can modify and run `train_bash.sh` <br>
 - Multi-datasets Training PORTAL: `multi_finetune_portal.py` <br>
-  - Modify it in the bash. What's more, you can choose to use joint-dataset or seperate-dataset training. <br>
+  - Modify it in the script. What's more, you can choose to use joint-dataset or seperate-dataset training. <br>
 - Hyper-parameter Testing: Finetune for ADE-20K semantic segmentation: `finetune_ade20k_semseg.py` <br>
 
 (more will be issued later) <br>
@@ -34,7 +34,7 @@ You can modify and run `train_bash.sh` <br>
 For new model evaluation experiments, check the directory `$Painter_ROOT/self_experiments/eval` <br>
 You can modify and run `eval_bash.sh` <br>
 - Multi-datasets Evaluation PORTAL: `multi_test_portal.py` <br>
-  - Modify it in the script, where datasets are evaluated in sequence and overall metrics are generated <br>
+  - Modify it in the script, where datasets are evaluated one-by-one and overall metrics will be generated <br>
 - Hyper-parameter Testing: Evaluation for ADE-20K semantic segmentation: `test_ade20k_semseg.py` <br>
 
 (more will be issued later) <br>

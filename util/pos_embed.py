@@ -97,6 +97,7 @@ def interpolate_pos_embed(model, checkpoint_model):
             checkpoint_model['pos_embed'] = new_pos_embed
             
 def interpolate_rel_pos_embed(model, checkpoint):
+    # print(checkpoint.keys())
     for i in range(model.cr_depth):
         param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
         checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
