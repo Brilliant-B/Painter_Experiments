@@ -449,6 +449,7 @@ class Painter_Varient(nn.Module):
         elif self.loss_func == "smoothl1":
             loss = F.smooth_l1_loss(pred, target, reduction="none", beta=0.01)
         # loss: (B, H, W, 3)
+        # print(image_mask.sum()/image_mask.numel())
         Loss = (loss * image_mask).sum() / (image_mask.sum() + 1e-2)  # mean loss on removed patches
         return Loss, image_mask
 

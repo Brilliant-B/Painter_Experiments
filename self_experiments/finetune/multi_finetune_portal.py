@@ -412,12 +412,19 @@ if __name__ == '__main__':
         val_json_path.append(os.path.join(args.data_path, VAL_JSON_BANK[dataset_name]))
     args.json_path, args.val_json_path = json_path, val_json_path
     
-    args.save_itrs = 1000
+    mask_ratios = {
+        5000: 0.3, 
+        10000: 0.5,
+        15000: 0.8,
+    }
     args.joint_datasets = True
+    args.save_itrs = 5000
+    args.mask_ratio = 0.8
     
     args.num_prompts = 2
-    args.cr_depth = 9
-    args.xcr_depth = 12
+    args.cr_depth = 16
+    args.xcr_depth = 18
     args.finetune_code = 1
+    args.finetune = "workbench/train_painter_variant_2/Joint_2_contexts_16_cr_depth_18_xcr_depth_1_finetune_code/0-10000.pth"
     
     main(args)
