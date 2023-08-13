@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1,"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
 import sys
 sys.path.append('.')
 sys.path.insert(0, "./")
@@ -27,7 +27,6 @@ from torch.utils.data import DataLoader, DistributedSampler
 from util.ddp_utils import DatasetTest
 from util import ddp_utils
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
-from data.pairdataset_variant import PairDataset
 
 import models.painter_variant_2 as painter_variant
 
@@ -104,6 +103,94 @@ def eval_ade20k_semseg(metric_results, args, verbose=False):
 
 
 
+def eval_nyu_depth_v2(metric_results, args, verbose=False):
+    import fnmatch, cv2
+    from eval.nyuv2_depth.eval_with_pngs import eval as NYU_Eval
+    args.gt_path = "datasets/nyu_depth_v2/official_splits/test/"
+    args.min_depth_eval, args.max_depth_eval = 1e-3, 10
+    args.eigen_crop, args.garg_crop, args.do_kb_crop =  True, False, False
+    
+    gt_depths = []
+    missing_ids = set()
+    pred_filenames, pred_depths = [], []
+    for root, _, filenames in os.walk(args.dst_dir):
+        for pred_filename in fnmatch.filter(filenames, '*.png'):
+            if 'cmap' in pred_filename or 'gt' in pred_filename:
+                continue
+            dirname = root.replace(args.dst_dir, '')
+            pred_filenames.append(os.path.join(dirname, pred_filename))
+    
+    num_test_samples = len(pred_filenames)
+    for i in range(num_test_samples):
+        pred_depth_path = os.path.join(args.dst_dir, pred_filenames[i])
+        pred_depth = cv2.imread(pred_depth_path, -1)
+        if verbose: print(pred_depth_path)
+        if pred_depth is None:
+            if verbose: print('Missing: %s ' % pred_depth_path)
+            missing_ids.add(i)
+            continue
+        pred_depths.append(pred_depth.astype(np.float32) / 1000.0)
+    
+    if verbose:
+        print('Raw png files reading done')
+        print('Evaluating {} files'.format(len(pred_depths)))
+    for t_id in range(num_test_samples):
+        file_dir = pred_filenames[t_id].split('.')[0]
+        filename = file_dir.split('_')[-1]
+        gt_depth_path = glob.glob(os.path.join(args.gt_path, '*', 'sync_depth_' + filename + '.png'))[0]
+        if verbose: print(gt_depth_path, gt_depth_path[0])
+        depth = cv2.imread(gt_depth_path, -1)
+        if depth is None:
+            print('Missing: %s ' % gt_depth_path)
+            missing_ids.add(t_id)
+            continue
+        depth = depth.astype(np.float32) / 1000.0
+        gt_depths.append(depth)
+
+    if verbose:
+        print('GT files reading done')
+        print('{} GT files missing'.format(len(missing_ids)))
+        print('Computing errors')
+    
+    info = [pred_depths, gt_depths, missing_ids]
+    d1, d2, d3, abs_rel, sq_rel, rms, log_rms, silog, log10 = NYU_Eval(args, info)
+    results = {'RMSE': rms, 'RMSELog': log_rms, 'SILog': silog, 'Abs.Rel': abs_rel, 'Sq.Rel': sq_rel, \
+        'Log10': log10, 'd1': d1, 'd2': d2, 'd3': d3}
+    for key in results.keys():
+        metric_results[key] = float(results[key])
+    return metric_results
+
+
+
+def eval_low_light_enhance(metric_results, args, lol_outputs, verbose=False):
+    from skimage.metrics import peak_signal_noise_ratio as psnr_loss
+    from skimage.metrics import structural_similarity as ssim_loss
+    
+    gt_path = os.path.join(args.dataset_root, "light_enhance/eval15/high")
+    num_pred = len(lol_outputs)
+    if verbose: print(f"loading predictions: {num_pred}")
+    
+    psnr_val_rgb, ssim_val_rgb = [], []
+    for rgb_pred, pred_path in lol_outputs:
+        file_name = pred_path.split('/')[-1]
+        rgb_gt = Image.open(os.path.join(gt_path, file_name)).convert("RGB")
+        rgb_gt = np.array(rgb_gt) / 255.
+        psnr = psnr_loss(rgb_pred, rgb_gt)
+        ssim = ssim_loss(rgb_pred, rgb_gt, channel_axis=-1, data_range=1)
+        psnr_val_rgb.append(psnr)
+        ssim_val_rgb.append(ssim)
+        if verbose: print("PSNR:", psnr, ", SSIM:", ssim, file_name, rgb_pred.shape)
+    
+    psnr_val_rgb = sum(psnr_val_rgb) / num_pred
+    ssim_val_rgb = sum(ssim_val_rgb) / num_pred
+    if verbose: print("PSNR: %f, SSIM: %f " % (psnr_val_rgb, ssim_val_rgb))
+    
+    metric_results["PSNR"] = psnr_val_rgb
+    metric_results["SSIM"] = ssim_val_rgb
+    return metric_results
+
+
+
 def get_args_parser():
     parser = argparse.ArgumentParser('Multi-Dataset Test Portal', add_help=False)
     # inference parameters
@@ -167,22 +254,44 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
 
 
 
+def get_prompts(args, dataset_name):
+    random.seed(args.seed)
+    context_set = DatasetTest(args.dataset_root, TRAIN_JSON_BANK[dataset_name], args.img_size, None)
+    idce = random.choices(range(len(context_set)), k=10)
+    prompts = []
+    for idx in idce:
+        img, _, tgt, _, _ = context_set[idx]
+        prompts.append(torch.stack([img, tgt], dim=0))
+    prompts = torch.stack(prompts, dim=1).repeat(args.batch_size, 1, 1, 1, 1, 1)
+    return prompts
+
+
+
 def run_one_batch(prompts, query, model, device):
     target = torch.zeros_like(query)
     valid = torch.ones_like(target)
     mask = torch.ones(model.module.ori_window_size).repeat(valid.shape[0], 1, 1)
-
     _, pred, _ = model(prompts.float().to(device), query.float().to(device), target.float().to(device), 
                        mask.float().to(device), valid.float().to(device))
-    
-    output= pred.detach().cpu()
-    output = torch.clip((output * imagenet_std + imagenet_mean) * 255, 0, 255)
+    output = pred.detach().cpu()
+    output = output * imagenet_std + imagenet_mean
     assert output.shape[-1] == 3
     return output
 
 
 
-def test_one_dataset(args, contexts, verbose=False, warm_up=False):
+def show_image(image, title='test'):
+    # image is [H, W, 3]
+    assert image.shape[2] == 3
+    image = image.detach().cpu()
+    image = torch.clip((image * imagenet_std + imagenet_mean) * 255, 0, 255)
+    out_image = Image.fromarray(image.int().numpy().astype(np.uint8))
+    out_image.save(f'{title}.jpg')
+    return
+
+
+
+def test_one_dataset(args, verbose=False, warm_up=False):
     dataset_dir = args.dataset_root
     dataset_name = args.dataset_name
     device = torch.device("cuda")
@@ -197,7 +306,7 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
     finetune_code = args.finetune_code
     use_cr_bank = args.use_cr_bank
     
-    
+    print(f"Eval.Dataset: 【{dataset_name}】")
     model = f"{model_name}_patch16_win_dec64_8glb_sl1"
     args.dst_dir = dst_dir = os.path.join(
         output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth/{}".format(num_prompts, cr_depth, xcr_depth, args.dataset_name)
@@ -215,56 +324,59 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
         model_painter.to(device)
         
         if dataset_dir == "toy_datasets/":  args.num_val = None
-        img_src_dir = dataset_dir + VAL_PATH[dataset_name]
-        dataset_val = DatasetTest(img_src_dir, img_size, args.num_val, ext_list=('*.jpg',))
+        dataset_val = DatasetTest(dataset_dir, VAL_JSON_BANK[dataset_name], img_size, args.num_val)
         sampler_val = DistributedSampler(dataset_val, shuffle=False)
+        num_val = len(dataset_val)
         data_loader_val = DataLoader(dataset_val, batch_size=batch_size, sampler=sampler_val,
                                     drop_last=False, collate_fn=ddp_utils.collate_fn, num_workers=2)
 
         # load context image-pairs as prompts
-        prompts = []
-        for pairs in contexts:
-            imgp = Image.open(os.path.join(args.dataset_root, pairs["image_path"])).convert("RGB")
-            imgp = imgp.resize((img_size, img_size))
-            imgp = torch.from_numpy(np.array(imgp) / 255.)
-            tgtp = Image.open(os.path.join(args.dataset_root, pairs["target_path"]))
-            tgtp = tgtp.resize((img_size, img_size))
-            tgtp = torch.from_numpy(np.array(tgtp) / 255.)
-            prompt = torch.stack([imgp, tgtp], dim=0)
-            prompt = (prompt - imagenet_mean) / imagenet_std
-            prompts.append(prompt)
-        prompts = torch.stack(prompts, dim=1).repeat(batch_size, 1, 1, 1, 1, 1)
+        prompts = args.context_base[dataset_name][:, :, :num_prompts, :, :, :]
         assert prompts.shape == (batch_size, 2, num_prompts, img_size, img_size, 3)
         
         # start running inference for metrics
         model_painter.eval()
-        T0 = time.perf_counter()
-        
+        if "lol" in dataset_name:   lol_outputs = []
+        TIME = 0
         for data in tqdm.tqdm(data_loader_val):
             assert batch_size == len(data)
             query, sizes, out_paths = [], [], []
             for unit_data in data:
-                img, img_path, size = unit_data
+                img, img_path, _, _, size = unit_data
                 img_name = os.path.basename(img_path)
                 out_path = os.path.join(dst_dir, img_name.replace('.jpg', '.png'))
                 out_paths.append(out_path)
-                query.append((torch.from_numpy(img).unsqueeze(0) - imagenet_mean) / imagenet_std)
+                query.append(img.unsqueeze(0))
                 sizes.append(size)
             query = torch.cat(query, dim=0)
             assert query.shape == (batch_size, img_size, img_size, 3)
             
+            TIME -= time.perf_counter()
             output = run_one_batch(prompts, query, model_painter, device)
+            TIME += time.perf_counter()
             
             if warm_up: continue
             for r in range(output.shape[0]):
-                out = F.interpolate(output[r:r+1].permute(0, 3, 1, 2), size=sizes[r][::-1], mode='bilinear')
-                out = out.permute(0, 2, 3, 1).squeeze(0).int()
-                out_img = Image.fromarray(out.numpy().astype(np.uint8))
+                if "depth" in dataset_name:
+                    out = torch.clip(output[r:r+1] * 10000, 0, 10000)
+                    out = F.interpolate(out.permute(0, 3, 1, 2), size=sizes[r][::-1], mode='bilinear')
+                    out = out.permute(0, 2, 3, 1).squeeze(0).mean(-1).int()
+                    out_img = Image.fromarray(out.numpy())
+                elif "lol" in dataset_name:
+                    out = F.interpolate(output[r:r+1].permute(0, 3, 1, 2), size=sizes[r][::-1], mode='bilinear')
+                    out = out.permute(0, 2, 3, 1).squeeze(0)
+                    out = torch.clip(out, 0, 1)
+                    lol_outputs.append([np.array(out), out_paths[r]])
+                    out = out * 255
+                    out_img = Image.fromarray(out.numpy().astype(np.uint8))
+                else:
+                    out = torch.clip(output[r:r+1] * 255, 0, 255)
+                    out = F.interpolate(out.permute(0, 3, 1, 2), size=sizes[r][::-1], mode='bilinear')
+                    out = out.permute(0, 2, 3, 1).squeeze(0).int()
+                    out_img = Image.fromarray(out.numpy().astype(np.uint8))
                 out_img.save(out_paths[r])
         
-        T1 = time.perf_counter()
-        TIME = T1 - T0
-        
+        metric_results['num_val'] = num_val
         metric_results['time'] = TIME
         if args.test_flops: metric_results['flops'] = flops
         if not args.eval and not warm_up:
@@ -284,6 +396,14 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
             metric_results = eval_ade20k_semseg(metric_results, args, verbose)
         elif dataset_name == "coco_image2panoptic_sem_seg":
             metric_results = eval_coco_pano_semseg(metric_results, args, verbose)
+        elif dataset_name == "nyuv2_image2depth":
+            metric_results = eval_nyu_depth_v2(metric_results, args, verbose)
+        elif dataset_name == "lol_image2enhance":
+            metric_results = eval_low_light_enhance(metric_results, args, lol_outputs, verbose)
+        elif dataset_name == "derain_image2derain":
+            print("Derain Evaluation: Please Run [eval/derain/evaluate_PSNR_SSIM.m] with MATLAB.")
+        elif dataset_name == "ssid_image2denoise":
+            print("Denoise Evaluation: Please Run [eval/sidd/eval_sidd.m] with MATLAB.")
         
         result_file = os.path.join(output_dir, "metrics.txt")
         if not warm_up:
@@ -300,51 +420,48 @@ def test_one_dataset(args, contexts, verbose=False, warm_up=False):
 
 
 
-def get_context_set(args, dataset_names):
-    random.seed(args.seed)
-    context_set = PairDataset(
-        root=args.dataset_root, 
-        json_path_list=[os.path.join(args.dataset_root, TRAIN_JSON_BANK[name]) for name in dataset_names], 
-        mask_ratio=0.0,
-    )
-    pairs = context_set.pairs
-    typed_pairs = context_set.pair_type_dict
-    contexts = {name: [pairs[idx] for idx in random.choices(typed_pairs[name], k=10)] for name in dataset_names}
-    return contexts
-
-
-
 imagenet_mean = np.array([0.485, 0.456, 0.406])
 imagenet_std = np.array([0.229, 0.224, 0.225])
 
 TRAIN_JSON_BANK = {
     "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
     "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json",
-    "denoise": "denoise/denoise_ssid_train.json",
-    "derain": "derain/derain_train.json",
-    "light_enhance": "light_enhance/enhance_lol_train.json",
-    "nyu_depth_v2": "nyu_depth_v2/nyuv2_sync_image_depth.json",
+    "nyuv2_image2depth": "nyu_depth_v2/nyuv2_sync_image_depth.json",
+    "derain_image2derain": "derain/derain_train.json",
+    "lol_image2enhance": "light_enhance/enhance_lol_train.json",
+    "ssid_image2denoise": "denoise/denoise_ssid_train.json",
     "coco_pano_inst": "coco/pano_ca_inst/coco_train_image_panoptic_inst.json",
     "coco_pose": "coco_pose/coco_pose_256x192_train.json",
 }
 
-VAL_PATH = {
-    "ade20k_image2semantic": "ade20k/images/validation",
-    "coco_image2panoptic_sem_seg": "coco/val2017",
+VAL_JSON_BANK = {
+    "ade20k_image2semantic": "ade20k/ade20k_validation_image_semantic.json",
+    "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_val2017_image_panoptic_sem_seg.json",
+    "nyuv2_image2depth": "nyu_depth_v2/nyuv2_test_image_depth.json",
+    "derain_image2derain": "derain/derain_test_rain100h.json",
+    "lol_image2enhance": "light_enhance/enhance_lol_val.json",
+    "ssid_image2denoise": "denoise/denoise_ssid_val.json",
+    "coco_pano_inst": "coco/pano_ca_inst/coco_val_image_panoptic_inst.json",
+    "coco_pose": "coco_pose/coco_pose_256x192_val.json",
 }
+
+
 
 if __name__ == '__main__':
     args = get_args_parser()
     args = ddp_utils.init_distributed_mode(args)
     
-    args.seed = 0
+    args.seed = 1
     args.batch_size = 1
     dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
+        "nyuv2_image2depth",
+        "lol_image2enhance",
+        # "derain_image2derain",
+        # "ssid_image2denoise",
     ]
-    contexts = get_context_set(args, dataset_names)
-    # print(contexts)
+    args.context_base = {dataset_name: get_prompts(args, dataset_name) for dataset_name in dataset_names}
     
     print("Anchor Test Started: Original Painter")
     args.num_prompts = 1
@@ -352,12 +469,11 @@ if __name__ == '__main__':
     args.xcr_depth = 24
     args.finetune_code = None
     args.use_cr_bank = False
-    args.num_val = None
+    args.num_val = 50
     anchor = {name: dict() for name in dataset_names}
     for dataset_name in dataset_names:
         args.dataset_name = dataset_name
-        d_context = contexts[dataset_name]
-        results = test_one_dataset(args, d_context[:args.num_prompts])
+        results = test_one_dataset(args)
         for key in results.keys():
             anchor[dataset_name][key] = results[key]
     print("Anchor Results:")
@@ -373,18 +489,16 @@ if __name__ == '__main__':
     args.xcr_depth = 18
     args.finetune_code = 1
     args.use_cr_bank = True
-    args.num_val = None
-    args.ckpt_path = "workbench/train_painter_variant_2/Joint_2_contexts_16_cr_depth_18_xcr_depth_1_finetune_code/checkpoint-0-5000.pth"
-    # args.ckpt_path = os.path.join(
-    #     f"workbench/train_{args.model_name}", \
-    #     f"{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code", \
-    #     "1000.pth"
-    # )
+    args.num_val = 50
+    args.ckpt_path = os.path.join(
+        f"workbench/train_{args.model_name}", \
+        f"Joint_{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code", \
+        "checkpoint-0-30000.pth"
+    )
     metrics = {name: dict() for name in dataset_names}
     for dataset_name in dataset_names:
         args.dataset_name = dataset_name
-        d_context = contexts[dataset_name]
-        results = test_one_dataset(args, d_context[:args.num_prompts])
+        results = test_one_dataset(args)
         for key in results.keys():
             metrics[dataset_name][key] = results[key]
     

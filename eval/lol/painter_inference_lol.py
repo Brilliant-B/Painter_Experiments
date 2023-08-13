@@ -115,8 +115,8 @@ if __name__ == '__main__':
     img_src_dir = "toy_datasets/light_enhance/eval15/low"
     img_path_list = glob.glob(os.path.join(img_src_dir, "*.png"))
 
-    img2_path = "toy_datasets/light_enhance/our485/low/{}.png".format(prompt)
-    tgt2_path = "toy_datasets/light_enhance/our485/high/{}.png".format(prompt)
+    img2_path = "datasets/light_enhance/our485/low/{}.png".format(prompt)
+    tgt2_path = "datasets/light_enhance/our485/high/{}.png".format(prompt)
     print('prompt: {}'.format(tgt2_path))
 
     # load the shared prompt image pair

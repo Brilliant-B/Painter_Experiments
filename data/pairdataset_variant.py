@@ -17,6 +17,9 @@ import numpy as np
 import torch
 from torchvision.datasets.vision import VisionDataset, StandardTransform
 
+imagenet_mean=torch.tensor([0.485, 0.456, 0.406])
+imagenet_std=torch.tensor([0.229, 0.224, 0.225])
+
 
 class PairDataset(VisionDataset):
     def __init__(
@@ -37,7 +40,7 @@ class PairDataset(VisionDataset):
         super().__init__(root, transforms, transform, target_transform)
         self.pairs = []
         self.weights = []
-        type_weight_list = [0.1, 0.2, 0.15, 0.25, 0.2, 0.15, 0.05, 0.05]
+        type_weight_list = [0.2, 0.25, 0.1, 0.05, 0.2, 0.15, 0.15, 0.05]
         for idx, json_path in enumerate(json_path_list):
             cur_pairs = json.load(open(json_path))
             self.pairs.extend(cur_pairs)
@@ -149,8 +152,7 @@ class PairDataset(VisionDataset):
         
         # get valid output pixels standards for each tasks
         valid = torch.ones_like(target)
-        imagenet_mean=torch.tensor([0.485, 0.456, 0.406])
-        imagenet_std=torch.tensor([0.229, 0.224, 0.225])
+        
         if "nyuv2_image2depth" in pair_type:
             thres = torch.ones(3) * (1e-3 * 0.1)
             thres = (thres - imagenet_mean) / imagenet_std

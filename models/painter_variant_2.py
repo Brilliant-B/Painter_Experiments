@@ -375,34 +375,34 @@ class Painter_Varient(nn.Module):
         
         latents = []
         for idx, blk in enumerate(self.blocks):
-            if idx == self.merge_layer:
-                x = x.mean(1, keepdim=True)
-            if idx == self.cr_depth:
-                if self.use_cr_bank and self.cr_bank is not None:
-                    x = torch.cat([self.cr_bank, x], dim=2) # (B, -1, num_prompts+1, Hp, Wp, C)
-                elif self.use_cr_bank:
-                    self.cr_bank = x[:, :, :-1] # (B, -1, num_prompts, Hp, Wp, C)
-                x = x.reshape(B, -1, 1, (self.num_prompts + 1) * Hp, Wp, C)
-            if idx == self.xcr_depth:
-                x = x.reshape(B, -1, self.num_prompts + 1, Hp, Wp, C)
-                p, y = x.split((self.num_prompts, 1), dim=2)
-                x = torch.cat([torch.mean(p, dim=2, keepdim=True), y], dim=2)
-            
             ori_shape = x.shape
             x = x.reshape(-1, *(blk.input_size), C)
             x = blk(x)
             x = x.reshape(ori_shape)
             
+            if idx == self.merge_layer - 1 :
+                x = x.mean(1, keepdim=True)
+            if idx == self.cr_depth - 1:
+                if self.use_cr_bank and self.cr_bank is not None:
+                    x = torch.cat([self.cr_bank, x], dim=2) # (B, -1, num_prompts+1, Hp, Wp, C)
+                elif self.use_cr_bank:
+                    self.cr_bank = x[:, :, :-1] # (B, -1, num_prompts, Hp, Wp, C)
+                x = x.reshape(B, -1, 1, (self.num_prompts + 1) * Hp, Wp, C)
+            if idx == self.xcr_depth - 1:
+                x = x.reshape(B, -1, self.num_prompts + 1, Hp, Wp, C)
+                p, y = x.split((self.num_prompts, 1), dim=2)
+                x = torch.cat([torch.mean(p, dim=2, keepdim=True), y], dim=2)
+            
             if idx in self.encoder_sampling:
                 feat = torch.reshape(x, (B, ori_shape[1], -1, Hp, Wp, C)).mean(1) # (B, -1, Hp, Wp, C)
-                if self.use_cr_bank and len(self.latent_bank) and idx in self.latent_bank.keys() and idx < self.cr_depth:
+                if self.use_cr_bank and len(self.latent_bank) and idx in self.latent_bank.keys() and idx < self.cr_depth - 1:
                     feat_prompt = self.latent_bank[idx] # (B, Hp, Wp, C)
                     feat_query = feat.squeeze(1) # (B, Hp, Wp, C)
                 else:
                     feat_prompts, feat_query = torch.split(feat, (feat.shape[1]-1, 1), dim=1) # (B, 1, Hp, Wp, C)
                     feat_prompt = feat_prompts.mean(dim=1) # (B, Hp, Wp, C)
                     feat_query = feat_query.squeeze(1) # (B, Hp, Wp, C)
-                    if self.use_cr_bank and idx < self.cr_depth:
+                    if self.use_cr_bank and idx < self.cr_depth - 1:
                         self.latent_bank[idx] = feat_prompt
                 single_latent = self.norm(torch.cat((feat_prompt, feat_query), dim=1)) # (B, 2 * Hp, Wp, C)
                 latents.append(single_latent)

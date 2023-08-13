@@ -2,18 +2,54 @@ import os
 import glob
 from PIL import Image
 import numpy as np
+import json
 
 import torch
 from torch.utils.data import Dataset
 import torch.distributed as dist
 
+imagenet_mean = np.array([0.485, 0.456, 0.406])
+imagenet_std = np.array([0.229, 0.224, 0.225])
+
 
 class DatasetTest(Dataset):
+    def __init__(self, dataset_root, json_path, input_size, num_val=None):
+        super(DatasetTest, self).__init__()
+        self.dataset_root = dataset_root
+        self.json_path = os.path.join(dataset_root, json_path)
+        self.input_size = input_size
+        val_pairs = json.load(open(self.json_path))
+        self.img_paths = list(val_pairs[:num_val])
+        # self.root = os.path.commonprefix(val_pairs)
+
+    def __len__(self):
+        return len(self.img_paths)
+
+    def __getitem__(self, index):
+        img_path = os.path.join(self.dataset_root, self.img_paths[index]["image_path"])
+        img = Image.open(img_path)
+        ori_size = list(img.size)
+        img = img.convert("RGB").resize((self.input_size, self.input_size))
+        img = torch.from_numpy((np.array(img) / 255. - imagenet_mean) / imagenet_std)
+        
+        tgt_path = os.path.join(self.dataset_root, self.img_paths[index]["target_path"])
+        tgt = Image.open(tgt_path)
+        if "depth" in self.json_path:
+            tgt = np.array(tgt) * 225 / 10000.
+            tgt = Image.fromarray(tgt)
+        tgt = tgt.convert("RGB").resize((self.input_size, self.input_size))
+        tgt = torch.from_numpy((np.array(tgt) / 255. - imagenet_mean) / imagenet_std)
+        
+        assert img.shape == tgt.shape
+        return img, img_path, tgt, tgt_path, ori_size
+
+
+class DatasetTest_Ori(Dataset):
     """
     define dataset for ddp
     """
     def __init__(self, img_src_dir, input_size, num_val=None, ext_list=('*.png', '*.jpg'), ):
-        super(DatasetTest, self).__init__()
+        super(DatasetTest_Ori, self).__init__()
         self.img_src_dir = img_src_dir
         self.input_size = input_size
 
@@ -35,7 +71,6 @@ class DatasetTest(Dataset):
         size_org = img.size
         img = img.resize((self.input_size, self.input_size))
         img = np.array(img) / 255.
-
         return img, img_path, size_org
 
 

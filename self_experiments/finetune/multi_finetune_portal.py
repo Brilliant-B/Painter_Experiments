@@ -373,10 +373,10 @@ def main(args):
 TRAIN_JSON_BANK = {
     "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
     "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json",
-    "denoise": "denoise/denoise_ssid_train.json",
-    "derain": "derain/derain_train.json",
-    "light_enhance": "light_enhance/enhance_lol_train.json",
-    "nyu_depth_v2": "nyu_depth_v2/nyuv2_sync_image_depth.json",
+    "nyuv2_image2depth": "nyu_depth_v2/nyuv2_sync_image_depth.json",
+    "derain_image2derain": "derain/derain_train.json",
+    "lol_image2enhance": "light_enhance/enhance_lol_train.json",
+    "ssid_image2denoise": "denoise/denoise_ssid_train.json",
     "coco_pano_inst": "coco/pano_ca_inst/coco_train_image_panoptic_inst.json",
     "coco_pose": "coco_pose/coco_pose_256x192_train.json",
 }
@@ -384,10 +384,10 @@ TRAIN_JSON_BANK = {
 VAL_JSON_BANK = {
     "ade20k_image2semantic": "ade20k/ade20k_validation_image_semantic.json",
     "coco_image2panoptic_sem_seg": "coco/pano_sem_seg/coco_val2017_image_panoptic_sem_seg.json",
-    "denoise": "denoise/denoise_ssid_val.json",
-    "derain": "derain/derain_test_rain100h.json",
-    "light_enhance": "light_enhance/enhance_lol_val.json",
-    "nyu_depth_v2": "nyu_depth_v2/nyuv2_test_image_depth.json",
+    "nyuv2_image2depth": "nyu_depth_v2/nyuv2_test_image_depth.json",
+    "derain_image2derain": "derain/derain_test_rain100h.json",
+    "lol_image2enhance": "light_enhance/enhance_lol_val.json",
+    "ssid_image2denoise": "denoise/denoise_ssid_val.json",
     "coco_pano_inst": "coco/pano_ca_inst/coco_val_image_panoptic_inst.json",
     "coco_pose": "coco_pose/coco_pose_256x192_val.json",
 }
@@ -405,6 +405,10 @@ if __name__ == '__main__':
     dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
+        "nyuv2_image2depth",
+        "lol_image2enhance",
+        # "derain_image2derain",
+        # "ssid_image2denoise",
     ]
     json_path, val_json_path = [], []
     for dataset_name in dataset_names:
@@ -418,13 +422,13 @@ if __name__ == '__main__':
         15000: 0.8,
     }
     args.joint_datasets = True
-    args.save_itrs = 5000
-    args.mask_ratio = 0.8
+    args.save_itrs = 10000
+    args.mask_ratio = 0.5
     
     args.num_prompts = 2
     args.cr_depth = 16
     args.xcr_depth = 18
     args.finetune_code = 1
-    args.finetune = "workbench/train_painter_variant_2/Joint_2_contexts_16_cr_depth_18_xcr_depth_1_finetune_code/0-10000.pth"
+    # args.finetune = "workbench/train_painter_variant_2/Joint_2_contexts_16_cr_depth_18_xcr_depth_1_finetune_code/0-10000.pth"
     
     main(args)

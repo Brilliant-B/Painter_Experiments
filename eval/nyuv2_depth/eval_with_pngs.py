@@ -21,6 +21,7 @@ import argparse
 import fnmatch
 import cv2
 import numpy as np
+import glob
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '1'
 
@@ -31,20 +32,21 @@ def convert_arg_line_to_args(arg_line):
             continue
         yield arg
 
+def get_args_parser():
+    parser = argparse.ArgumentParser(description='BTS TensorFlow implementation.', fromfile_prefix_chars='@')
+    parser.convert_arg_line_to_args = convert_arg_line_to_args
 
-parser = argparse.ArgumentParser(description='BTS TensorFlow implementation.', fromfile_prefix_chars='@')
-parser.convert_arg_line_to_args = convert_arg_line_to_args
+    parser.add_argument('--pred_path',           type=str,   help='path to the prediction results in png', required=True)
+    parser.add_argument('--gt_path',             type=str,   help='root path to the groundtruth data', required=False)
+    parser.add_argument('--dataset',             type=str,   help='dataset to test on, nyu or kitti', default='nyu')
+    parser.add_argument('--eigen_crop',                      help='if set, crops according to Eigen NIPS14', action='store_true')
+    parser.add_argument('--garg_crop',                       help='if set, crops according to Garg  ECCV16', action='store_true')
+    parser.add_argument('--min_depth_eval',      type=float, help='minimum depth for evaluation', default=1e-3)
+    parser.add_argument('--max_depth_eval',      type=float, help='maximum depth for evaluation', default=80)
+    parser.add_argument('--do_kb_crop',                      help='if set, crop input images as kitti benchmark images', action='store_true')
 
-parser.add_argument('--pred_path',           type=str,   help='path to the prediction results in png', required=True)
-parser.add_argument('--gt_path',             type=str,   help='root path to the groundtruth data', required=False)
-parser.add_argument('--dataset',             type=str,   help='dataset to test on, nyu or kitti', default='nyu')
-parser.add_argument('--eigen_crop',                      help='if set, crops according to Eigen NIPS14', action='store_true')
-parser.add_argument('--garg_crop',                       help='if set, crops according to Garg  ECCV16', action='store_true')
-parser.add_argument('--min_depth_eval',      type=float, help='minimum depth for evaluation', default=1e-3)
-parser.add_argument('--max_depth_eval',      type=float, help='maximum depth for evaluation', default=80)
-parser.add_argument('--do_kb_crop',                      help='if set, crop input images as kitti benchmark images', action='store_true')
-
-args = parser.parse_args()
+    args = parser.parse_args()
+    return args
 
 
 def compute_errors(gt, pred):
@@ -75,43 +77,35 @@ def test():
     global gt_depths, missing_ids, pred_filenames
     gt_depths = []
     missing_ids = set()
-    pred_filenames = []
-
-    for root, dirnames, filenames in os.walk(args.pred_path):
+    
+    pred_filenames, pred_depths = [], []
+    for root, filenames in os.walk(args.pred_path):
         for pred_filename in fnmatch.filter(filenames, '*.png'):
             if 'cmap' in pred_filename or 'gt' in pred_filename:
                 continue
             dirname = root.replace(args.pred_path, '')
             pred_filenames.append(os.path.join(dirname, pred_filename))
-
-    num_test_samples = len(pred_filenames)
-
-    pred_depths = []
-
+    num_test_samples = len(pred_filenames)    
     for i in range(num_test_samples):
         pred_depth_path = os.path.join(args.pred_path, pred_filenames[i])
         pred_depth = cv2.imread(pred_depth_path, -1)
+        if verbose: print(pred_depth_path)
         if pred_depth is None:
             print('Missing: %s ' % pred_depth_path)
             missing_ids.add(i)
             continue
+        pred_depths.append(pred_depth.astype(np.float32) / 1000.0)
 
-        if args.dataset == 'nyu':
-            pred_depth = pred_depth.astype(np.float32) / 1000.0
-        else:
-            pred_depth = pred_depth.astype(np.float32) / 256.0
-
-        pred_depths.append(pred_depth)
-
-    print('Raw png files reading done')
-    print('Evaluating {} files'.format(len(pred_depths)))
+    if verbose:
+        print('Raw png files reading done')
+        print('Evaluating {} files'.format(len(pred_depths)))
 
     if args.dataset == 'kitti':
         for t_id in range(num_test_samples):
             file_dir = pred_filenames[t_id].split('.')[0]
             filename = file_dir.split('_')[-1]
             directory = file_dir.replace('_' + filename, '')
-            gt_depth_path = os.path.join(args.gt_path, directory, 'proj_depth/groundtruth/image_02', filename + '.png')
+            
             depth = cv2.imread(gt_depth_path, -1)
             if depth is None:
                 print('Missing: %s ' % gt_depth_path)
@@ -126,7 +120,9 @@ def test():
             file_dir = pred_filenames[t_id].split('.')[0]
             filename = file_dir.split('_')[-1]
             directory = file_dir.replace('_rgb_'+file_dir.split('_')[-1], '')
-            gt_depth_path = os.path.join(args.gt_path, directory, 'sync_depth_' + filename + '.png')
+            gt_depth_path = glob.glob(os.path.join(gt_path, '*', 'sync_depth_' + filename + '.png'))[0]
+            print(gt_depth_path, gt_depth_path[0])
+            
             depth = cv2.imread(gt_depth_path, -1)
             if depth is None:
                 print('Missing: %s ' % gt_depth_path)
@@ -140,24 +136,25 @@ def test():
     print('{} GT files missing'.format(len(missing_ids)))
 
     print('Computing errors')
-    eval(pred_depths)
+    metrics = eval(pred_depths, missing_ids)
 
     print('Done.')
 
 
-def eval(pred_depths):
-
+def eval(args, info, verbose=False):
+    pred_depths, gt_depths, missing = info
     num_samples = len(pred_depths)
     pred_depths_valid = []
 
     i = 0
     for t_id in range(num_samples):
-        if t_id in missing_ids:
+        if t_id in missing:
             continue
 
         pred_depths_valid.append(pred_depths[t_id])
 
-    num_samples = num_samples - len(missing_ids)
+    num_samples = num_samples - len(missing)
+    if verbose: print(num_samples)
 
     silog = np.zeros(num_samples, np.float32)
     log10 = np.zeros(num_samples, np.float32)
@@ -199,22 +196,21 @@ def eval(pred_depths):
                 eval_mask[int(0.40810811 * gt_height):int(0.99189189 * gt_height), int(0.03594771 * gt_width):int(0.96405229 * gt_width)] = 1
 
             elif args.eigen_crop:
-                if args.dataset == 'kitti':
-                    eval_mask[int(0.3324324 * gt_height):int(0.91351351 * gt_height), int(0.0359477 * gt_width):int(0.96405229 * gt_width)] = 1
-                else:
-                    eval_mask[45:471, 41:601] = 1
+                eval_mask[45:471, 41:601] = 1
 
             valid_mask = np.logical_and(valid_mask, eval_mask)
 
         silog[i], log10[i], abs_rel[i], sq_rel[i], rms[i], log_rms[i], d1[i], d2[i], d3[i] = compute_errors(gt_depth[valid_mask], pred_depth[valid_mask])
 
-    print("{:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}".format(
-        'd1', 'd2', 'd3', 'AbsRel', 'SqRel', 'RMSE', 'RMSElog', 'SILog', 'log10'))
-    print("{:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}".format(
-        d1.mean(), d2.mean(), d3.mean(),
-        abs_rel.mean(), sq_rel.mean(), rms.mean(), log_rms.mean(), silog.mean(), log10.mean()))
-
-    return silog, log10, abs_rel, sq_rel, rms, log_rms, d1, d2, d3
+    if verbose:
+        print("{:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}, {:>7}".format(
+            'd1', 'd2', 'd3', 'AbsRel', 'SqRel', 'RMSE', 'RMSElog', 'SILog', 'log10'))
+        print("{:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}, {:7.3f}".format(
+            d1.mean(), d2.mean(), d3.mean(),
+            abs_rel.mean(), sq_rel.mean(), rms.mean(), log_rms.mean(), silog.mean(), log10.mean()))
+        print('Done.')
+    
+    return d1.mean(), d2.mean(), d3.mean(), abs_rel.mean(), sq_rel.mean(), rms.mean(), log_rms.mean(), silog.mean(), log10.mean()
 
 
 def main():
