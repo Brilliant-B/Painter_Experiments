@@ -34,7 +34,7 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.mo_painter.mo_painter_1 as painter_variant
+import models.mo_painter.mo_painter_2 as painter_variant
 from self_experiments.mo_painter.finetune.engine_train import train_one_epoch
 
 TRAIN_JSON_BANK = {
@@ -179,12 +179,12 @@ def prepare_model(args, prints=False):
     model = painter_variant.__dict__[args.model](
         seed=args.seed,
         datasets=args.datasets_weights.keys(),
-        use_feature_momentum=args.use_fmo,
         num_contexts_in=args.nci,
         num_contexts=args.nc, 
         cq_depth=args.cq,
         fcq_depth=args.fcq,
-        momentum_weight=args.mo,
+        context_momentum_weight=args.cmo,
+        query_momentum_weight=args.qmo,
         dataset_loss_weight=args.datasets_weights,
         is_infer=False,
     ).to("cuda")
@@ -220,7 +220,6 @@ def prepare_model(args, prints=False):
         
         # load pre-trained model
         msg = model.load_state_dict(checkpoint, strict=False)
-        model.init_cm_encoder()
         if prints:  print(msg)
         
         # freeze part of the modules
@@ -301,7 +300,7 @@ def main(args, INFO):
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     output_dir = args.output_dir = os.path.join(args.base_output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}|{args.mo}:{args.finetune_code}:{args.mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}:{args.qmo}:{args.cmo}|{args.finetune_code}:{args.mask_ratio}")
     train_log_dir = os.path.join(output_dir, "train_log.log")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print('output_dir: {}'.format(output_dir))
@@ -439,7 +438,7 @@ if __name__ == '__main__':
     
     INFO = dict()
     INFO['seed'] = args.seed = 0
-    INFO['save_freq'] = args.save_itrs = 6400
+    INFO['save_freq'] = args.save_itrs = 10400
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
         "ade20k_image2semantic": 1.5,
         "coco_image2panoptic_sem_seg": 2,
@@ -448,7 +447,6 @@ if __name__ == '__main__':
         # "derain_image2derain": 1,
         # "ssid_image2denoise": 1,
     }
-    
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
         json_path.append(os.path.join(args.data_path, TRAIN_JSON_BANK[dataset_name]))
@@ -459,8 +457,8 @@ if __name__ == '__main__':
     INFO['finetune'] = args.finetune_code = 2
     INFO['mask_ratio'] = args.mask_ratio = 0.5
     
-    INFO['use_feature_momentum'] = args.use_fmo = True
-    INFO['update_momentum_ratio'] = args.mo = 0.25
+    INFO['context_momentum_weight'] = args.cmo = 0.0
+    INFO['query_momentum_weight'] = args.qmo = 0.2
     INFO['num_contexts_input'] = args.nci = 1
     INFO['num_contexts_used'] = args.nc = 3
     INFO['cr_depth'] = args.cq = 15
@@ -470,7 +468,5 @@ if __name__ == '__main__':
     INFO['accum_iter'] = args.accum_iter = 32
     INFO['learning_rate'] = args.lr = 1e-4
     INFO['warmup_itrs'] = args.warmup_itrs = 2048
-    
-    # args.finetune = "workbench/train_painter_variant_2/Joint_2_contexts_16_cr_depth_18_xcr_depth_1_finetune_code/0-10000.pth"
     
     main(args, INFO)

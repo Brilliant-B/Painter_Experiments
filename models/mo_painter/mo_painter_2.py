@@ -226,12 +226,12 @@ class Painter_Varient(nn.Module):
             
             seed=0,
             datasets=None,
-            use_feature_momentum=True,
             num_contexts_in=1,
             num_contexts=3,
             cq_depth=12,
             fcq_depth=12,
-            momentum_weight=0.9,
+            context_momentum_weight=0.2,
+            query_momentum_weight=0,
             dataset_loss_weight=None,
             is_infer=False,
             use_cache=True,
@@ -277,7 +277,6 @@ class Painter_Varient(nn.Module):
         self.encoder_sampling = set([6, 12, 18, 24])
         self.dloss_weight = dataset_loss_weight
         
-        self.use_fmo = use_feature_momentum
         self.nc = num_contexts
         self.nci = num_contexts_in
         if self.is_infer:   assert self.nci == self.nc
@@ -298,22 +297,11 @@ class Painter_Varient(nn.Module):
         else:
             self.pos_embed = None
         
-        self.mo = momentum_weight
-        assert 0 <= self.mo <= 1
+        self.cmo = context_momentum_weight
+        self.qmo = query_momentum_weight
+        assert 0 <= self.cmo <= 1 and 0 <= self.qmo <= 1
         
         self.nl = sum([x <= self.cq for x in self.encoder_sampling])
-        
-        # if self.is_infer:
-        #     self.register_buffer('cache', None)
-        # else:
-        #     self.queues = dict()
-        #     self.ptrs = dict()
-        #     for name in datasets:
-        #         self.register_buffer('queue', F.normalize(torch.randn(self.nc, *self.ori_window_size, (self.nl + 1) * embed_dim), dim=-1))
-        #         self.register_buffer('ptr', torch.zeros(1, dtype=int))
-        #         self.queues[name] = self.queue
-        #         self.ptrs[name] = self.ptr
-        #     del self.queue, self.ptr
         
         if self.is_infer:
             self.cache = None
@@ -325,25 +313,9 @@ class Painter_Varient(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]
 
         self.blocks = nn.ModuleList()
-        self.cm_blocks = nn.ModuleList()
         for i in range(self.depth):
             if i < self.cq:
                 input_size = self.ori_window_size
-                cm_block = Block(
-                    dim=embed_dim,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop_path=dpr[i],
-                    norm_layer=norm_layer,
-                    act_layer=act_layer,
-                    use_rel_pos=use_rel_pos,
-                    rel_pos_zero_init=rel_pos_zero_init,
-                    window_size=window_size if i in window_block_indexes else 0,
-                    use_residual_block=i in residual_block_indexes,
-                    input_size=input_size,
-                )
-                self.cm_blocks.append(cm_block)
             elif i < self.fcq:
                 input_size = ((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1])
             else:
@@ -402,35 +374,12 @@ class Painter_Varient(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed', 'cls_token'}
     
-    @torch.no_grad()
-    def init_cm_encoder(self):
-        for param_cm, param_q in zip(self.cm_blocks.parameters(), self.blocks[:self.cq].parameters()):
-            param_cm.data.copy_(param_q.data)  # initialize
-            param_cm.requires_grad = False
-    
-    @torch.no_grad()
-    def momentum_update_cm_encoder(self):
-        # print("momentum update")
-        for param_cm, param_q in zip(self.cm_blocks.parameters(), self.blocks[:self.cq].parameters()):
-            param_cm.data = param_cm.data * self.mo + param_q.data * (1. - self.mo)
-    
-    def cm_encoder(self, c):
-        c_latent = []
-        for idx in range(self.cq):
-            c = self.cm_blocks[idx](c)
-            if idx + 1 == self.merge_layer:
-                c = c.mean(2) # [B, nci, Hp, Wp, C]
-            if idx + 1 in self.encoder_sampling:
-                c_latent.append(self.norm(c))
-        c_latent = None if len(c_latent) == 0 else torch.cat(c_latent, dim=-1)
-        return c, c_latent
-    
-    def q_encoder(self, x):
+    def cq_encoder(self, x):
         x_latent = []
         for idx in range(self.cq):
             x = self.blocks[idx](x)
             if idx + 1 == self.merge_layer:
-                x = x.mean(1) # [B, Hp, Wp, C]
+                x = x.mean(-4)
             if idx + 1 in self.encoder_sampling:
                 x_latent.append(self.norm(x))
         x_latent = None if len(x_latent) == 0 else torch.cat(x_latent, dim=-1)
@@ -459,7 +408,7 @@ class Painter_Varient(nn.Module):
     def cache_storage(self, c, c_latent):
         if c_latent is not None:
             c = torch.cat([c_latent, c], dim=-1)
-        self.cache = c
+        self.cache = c.cpu()
     
     @torch.no_grad()
     def cache_sampling(self, C):
@@ -468,16 +417,27 @@ class Painter_Varient(nn.Module):
         c = c.flatten(1, 2)
         c_latent = None if c_latent.shape[-1] == 0 else c_latent.mean(1)
         return c, c_latent  # [B, nc*Hp, Wp, C] [B, Hp, Wp, nl*C]
-        
-    @torch.no_grad()
-    def context_queue_update(self, type, c, c_latent):
+    
+    @torch.no_grad() # cmo_former
+    def queue_cmo_update(self, type, c, c_latent):
         # [B, nci, Hp, Wp, (nl+1)*C]
         if c_latent is not None:
             c = torch.cat([c_latent, c], dim=-1).cpu()
         for i in range(len(type)):
             ptr = self.ptrs[type[i]]
-            self.queues[type[i]][ptr:ptr + self.nci] = c[i]
+            self.queues[type[i]][ptr:ptr + self.nci] = \
+                self.cmo * self.queues[type[i]][ptr:ptr + self.nci] + (1 - self.cmo) * c[i]
             self.ptrs[type[i]] = (ptr + self.nci) % self.nc
+            
+    @torch.no_grad() # qmo_latter
+    def queue_qmo_update(self, type, q, q_latent):
+        # [B, Hp, Wp, (nl+1)*C]
+        if q_latent is not None:
+            q = torch.cat([q_latent, q], dim=-1).cpu()
+        for i in range(len(type)):
+            ptr = self.ptrs[type[i]]
+            self.queues[type[i]][ptr:ptr + self.nci] = \
+                self.qmo * self.queues[type[i]][ptr:ptr + self.nci] + (1 - self.qmo) * q[i].unsqueeze(0)
     
     @torch.no_grad()
     def context_queue_sampling(self, type, B, C):
@@ -492,16 +452,6 @@ class Painter_Varient(nn.Module):
         c_latent = None if len(c_latent) == 0 else torch.stack(c_latent, dim=0)
         return c, c_latent  # [B, nc*Hp, Wp, C] [B, Hp, Wp, nl*C]
     
-    @torch.no_grad()
-    def context_queue_momentum_update(self, type, q, q_latent):
-        # [B, nci, Hp, Wp, (nl+1)*C]
-        if q_latent is not None:
-            q = torch.cat([q_latent, q], dim=-1)
-        for i in range(len(type)):
-            ptr = self.ptrs[type[i]]
-            self.queues[type[i]][ptr] = self.mo * self.queues[type[i]][ptr] + (1 - self.mo) * q[i].unsqueeze(0).cpu()
-            self.ptrs[type[i]] = (ptr + 1) % self.nc
-    
     
     def forward_encoder(self, type, c_query, c_target, query, target, mask):
         x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
@@ -514,10 +464,10 @@ class Painter_Varient(nn.Module):
         x = torch.stack([x, t], dim=1) # (B, 2, Hp, Wp, C)
         if self.pos_embed is not None:
             x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-        x, x_latent = self.q_encoder(x)
+        x, x_latent = self.cq_encoder(x)
         assert x.shape == (B, Hp, Wp, C), x_latent.shape == (B, Hp, Wp, self.nl * C)
         
-        if (not self.is_infer and not self.use_fmo) or (self.is_infer and self.use_cache and self.cache is None):
+        if (not self.is_infer and self.cmo < 1.0) or (self.is_infer and self.use_cache and self.cache is None):
             c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
             c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
             co = self.patch_embed(co.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
@@ -525,15 +475,19 @@ class Painter_Varient(nn.Module):
             c = torch.stack([c, co], dim=2) # (B, nci, 2, Hp, Wp, C)
             if self.pos_embed is not None:
                 c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp)) 
-            c, c_latent = self.cm_encoder(c)
+            c, c_latent = self.cq_encoder(c)
             assert c.shape == (B, self.nci, Hp, Wp, C) and c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) and len(type) == B
-            if self.is_infer:   self.cache_storage(c, c_latent)
-            else:   self.context_queue_update(type, c, c_latent)
-        if not self.is_infer and self.use_fmo:
-            self.context_queue_momentum_update(type, x, x_latent)
+            if self.is_infer:
+                self.cache_storage(c, c_latent)
+            else:
+                self.queue_cmo_update(type, c, c_latent)
+        if not self.is_infer and self.qmo < 1.0:
+            self.queue_qmo_update(type, x, x_latent)
         
-        if self.is_infer and self.cache is not None:   c, c_latent = self.cache_sampling(C)
-        else:   c, c_latent = self.context_queue_sampling(type, B, C)
+        if self.is_infer and self.cache is not None:   
+            c, c_latent = self.cache_sampling(C)
+        else:
+            c, c_latent = self.context_queue_sampling(type, B, C)
         if x_latent is not None:
             x_latent = torch.cat([c_latent, x_latent], dim=1) # [B, 2*Hp, Wp, nl*C]
         x = torch.cat([c, x], dim=1) # [B, (n+1)*Hp, Wp, C]
@@ -609,7 +563,7 @@ class Painter_Varient(nn.Module):
         return loss, pred, image_mask
 
 
-def mo_painter_1_patch16_win_dec64_8glb_sl1(**kwargs):
+def mo_painter_2_patch16_win_dec64_8glb_sl1(**kwargs):
     model = Painter_Varient(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

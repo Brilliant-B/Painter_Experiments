@@ -95,7 +95,8 @@ def interpolate_pos_embed(model, checkpoint_model):
             pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
             new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
             checkpoint_model['pos_embed'] = new_pos_embed
-            
+
+
 def interpolate_rel_pos_embed(model, checkpoint):
     # print(checkpoint.keys())
     for i in range(model.cq):

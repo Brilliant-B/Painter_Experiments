@@ -2,7 +2,7 @@
 
 NUM_GPUS=1
 DATA_PATH=datasets
-name=mo_painter_1
+name=mo_painter_2
 python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12358 \
 	--use_env self_experiments/mo_painter/finetune/multi_finetune_portal.py \
     --batch_size 2 \
