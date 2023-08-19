@@ -24,9 +24,8 @@ imagenet_std=torch.tensor([0.229, 0.224, 0.225])
 class PairDataset(VisionDataset):
     def __init__(
         self,
-        root: str,
+        args,
         json_path_list: list,
-        args = None,
         transform: Optional[Callable] = None,
         transform2: Optional[Callable] = None,
         transform3: Optional[Callable] = None,
@@ -34,13 +33,11 @@ class PairDataset(VisionDataset):
         target_transform: Optional[Callable] = None,
         transforms: Optional[Callable] = None,
         masked_position_generator: Optional[Callable] = None,
-        mask_ratio:float = 1.,
-        seed = None,
     ) -> None:
-        super().__init__(root, transforms, transform, target_transform)
+        super().__init__(args.data_path, transforms, transform, target_transform)
         self.pairs = []
         self.weights = []
-        type_weight_list = [0.2, 0.25, 0.1, 0.05, 0.2, 0.15, 0.15, 0.05]
+        type_weight_list = [0.2, 0.3, 0.15, 0.05, 0.1, 0.15, 0.15, 0.05]
         for idx, json_path in enumerate(json_path_list):
             cur_pairs = json.load(open(json_path))
             self.pairs.extend(cur_pairs)
@@ -58,21 +55,17 @@ class PairDataset(VisionDataset):
         for t in self.pair_type_dict:
             print(t, len(self.pair_type_dict[t]))
         
-        self.seed = seed
         self.transforms = PairStandardTransform(transform, target_transform) if transform is not None else None
         self.transforms2 = PairStandardTransform(transform2, target_transform) if transform2 is not None else None
         self.transforms3 = PairStandardTransform(transform3, target_transform) if transform3 is not None else None
         self.transforms_seccrop = PairStandardTransform(transform_seccrop, target_transform) if transform_seccrop is not None else None
         self.masked_position_generator = masked_position_generator
+        self.img_size = args.img_size
+        self.nci = args.nci
         if masked_position_generator is not None:
-            self.mask_ratio = mask_ratio
+            self.mask_ratio = args.mask_ratio
             self.ori_window_size = self.masked_position_generator.get_shape()
-        
-        if args is not None:
-            self.img_size = args.img_size
-            self.num_prompts = args.num_prompts
-            self.cr_depth = args.cr_depth
-            self.xcr_depth = args.xcr_depth
+            
 
     def _load_image(self, path: str) -> Image.Image:
         while True:
@@ -103,6 +96,9 @@ class PairDataset(VisionDataset):
         target_prompts = [self._load_image(pair['target_path']) for pair in prompt_pairs]
         return image_prompts, target_prompts
     
+    def __len__(self) -> int:
+        return len(self.pairs)
+    
     def __getitem__(self, index: int) -> Tuple[Any, Any]:
         pair = self.pairs[index]
         pair_type = pair['type']
@@ -126,18 +122,18 @@ class PairDataset(VisionDataset):
         else:
             cur_transforms = self.transforms
         
-        image_prompts, target_prompts = self.get_k_type(pair_type, self.num_prompts)
-        image_pt, target_pt = [], []
-        for image_p, target_p in zip(image_prompts, target_prompts):
-            transformed = cur_transforms(image_p, target_p, interpolation1, interpolation2)
-            image_pt.append(transformed[0])
-            target_pt.append(transformed[1])
-        img_p = torch.stack(image_pt, dim=0)
-        tgt_p = torch.stack(target_pt, dim=0)
-        prompts = torch.stack([img_p, tgt_p], dim=0)
-        prompts = torch.einsum('mnchw->mnhwc', prompts)
-        assert prompts.shape == (2, self.num_prompts, *self.img_size, 3)        
-        # print(pair)
+        img_contexts, tgt_contexts = self.get_k_type(pair_type, self.nci)
+        img_c, tgt_c = [], []
+        for image_c, target_c in zip(img_contexts, tgt_contexts):
+            transformed = cur_transforms(image_c, target_c, interpolation1, interpolation2)
+            img_c.append(transformed[0])
+            tgt_c.append(transformed[1])
+        img_c = torch.stack(img_c, dim=0)
+        tgt_c = torch.stack(tgt_c, dim=0)
+        c_query = torch.einsum('nchw->nhwc', img_c)
+        c_target = torch.einsum('nchw->nhwc', tgt_c)
+        assert c_query.shape == c_target.shape == (self.nci, *self.img_size, 3)     
+        
         query = self._load_image(pair['image_path'])
         target = self._load_image(pair['target_path'])
         query, target = cur_transforms(query, target, interpolation1, interpolation2)
@@ -152,7 +148,6 @@ class PairDataset(VisionDataset):
         
         # get valid output pixels standards for each tasks
         valid = torch.ones_like(target)
-        
         if "nyuv2_image2depth" in pair_type:
             thres = torch.ones(3) * (1e-3 * 0.1)
             thres = (thres - imagenet_mean) / imagenet_std
@@ -179,11 +174,8 @@ class PairDataset(VisionDataset):
             if fg.sum() < 100*3:
                 valid = valid * 0.
         assert valid.shape == (*self.img_size, 3)
+        return pair_type, c_query, c_target, query, target, mask, valid
 
-        return prompts, query, target, mask, valid
-
-    def __len__(self) -> int:
-        return len(self.pairs)
 
 
 class PairStandardTransform(StandardTransform):

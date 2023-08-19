@@ -28,8 +28,7 @@ from util.ddp_utils import DatasetTest
 from util import ddp_utils
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
 
-import models.painter_variant_2 as painter_variant
-
+import models.mo_painter.mo_painter_0 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -199,7 +198,7 @@ def get_args_parser():
     parser.add_argument('--ckpt_path', type=str, help='path to ckpt', default='')
     parser.add_argument('--model_name', type=str, help='model name', default='painter_vit_large')
     parser.add_argument('--img_size', type=int, default=448)
-    parser.add_argument('--batch_size', type=int, default=2)
+    parser.add_argument('--batch_size', type=int, default=1)
     # evaluation parameters
     parser.add_argument('--eval', action='store_true', help='evaluate or not')
     parser.add_argument('--dist_type', type=str, help='color type', default='abs', choices=['abs', 'square', 'mean'])
@@ -217,19 +216,24 @@ def get_args_parser():
 def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1', args=None, prints=True):
     # build model
     model = getattr(painter_variant, arch)(
-        num_prompts=args.num_prompts, 
-        cr_depth=args.cr_depth, 
-        xcr_depth=args.xcr_depth,
-        use_cr_bank=args.use_cr_bank,
+        seed=args.seed,
+        num_contexts_in=args.nci,
+        num_contexts=args.nc, 
+        cq_depth=args.cq, 
+        fcq_depth=args.fcq,
+        momentum_weight=args.mo,
+        is_infer=True,
+        use_cache=args.use_cache,
     )
     model.to("cuda")
+    assert model.nc % args.batch_size == 0 and model.nc >= args.batch_size, "queue coherence error"
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
     model_without_ddp = model.module
     
     # processing FLOPS
     if args.test_flops:
         from fvcore.nn import FlopCountAnalysis, flop_count_table
-        dummy_inputs = (torch.randn(1, 2, args.num_prompts + 1, args.input_size, args.input_size, 3), 
+        dummy_inputs = (torch.randn(args.nci, 2, args.input_size, args.input_size, 3), 
                         torch.randn(1, args.input_size, args.input_size, 3),
                         torch.randn(1, args.input_size, args.input_size, 3),
                         torch.randn(1, *model_without_ddp.ori_window_size),
@@ -245,8 +249,13 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     interpolate_pos_embed(model_without_ddp, checkpoint)
     interpolate_rel_pos_embed(model_without_ddp, checkpoint)
     
-    msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
-    if prints:  
+    if "vit" in args.ckpt_path:
+        msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
+        model_without_ddp.init_cm_encoder()
+    else:
+        msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
+    
+    if prints:
         print(msg)
         print("Model Loaded.")
     
@@ -254,25 +263,28 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
 
 
 
-def get_prompts(args, dataset_name):
+def get_contexts(args, dataset_name):
     random.seed(args.seed)
     context_set = DatasetTest(args.dataset_root, TRAIN_JSON_BANK[dataset_name], args.img_size, None)
-    idce = random.choices(range(len(context_set)), k=10)
-    prompts = []
+    idce = random.choices(range(len(context_set)), k=6)
+    c_query, c_target = [], []
     for idx in idce:
         img, _, tgt, _, _ = context_set[idx]
-        prompts.append(torch.stack([img, tgt], dim=0))
-    prompts = torch.stack(prompts, dim=1).repeat(args.batch_size, 1, 1, 1, 1, 1)
-    return prompts
+        c_query.append(img)
+        c_target.append(tgt)
+    c_query = torch.stack(c_query, dim=0).repeat(args.batch_size, 1, 1, 1, 1)
+    c_target = torch.stack(c_target, dim=0).repeat(args.batch_size, 1, 1, 1, 1)
+    assert c_query.shape == c_target.shape == (args.batch_size, 6, args.img_size, args.img_size, 3)
+    return c_query, c_target
 
 
 
-def run_one_batch(prompts, query, model, device):
+def run_one_batch(type, c_query, c_target, query, model, device):
     target = torch.zeros_like(query)
     valid = torch.ones_like(target)
     mask = torch.ones(model.module.ori_window_size).repeat(valid.shape[0], 1, 1)
-    _, pred, _ = model(prompts.float().to(device), query.float().to(device), target.float().to(device), 
-                       mask.float().to(device), valid.float().to(device))
+    _, pred, _ = model(type, c_query.float().to(device), c_target.float().to(device), query.float().to(device), 
+                       target.float().to(device), mask.float().to(device), valid.float().to(device))
     output = pred.detach().cpu()
     output = output * imagenet_std + imagenet_mean
     assert output.shape[-1] == 3
@@ -291,7 +303,7 @@ def show_image(image, title='test'):
 
 
 
-def test_one_dataset(args, verbose=False, warm_up=False):
+def test_one_dataset(args, INFO, verbose=False, warm_up=False):
     dataset_dir = args.dataset_root
     dataset_name = args.dataset_name
     device = torch.device("cuda")
@@ -300,17 +312,9 @@ def test_one_dataset(args, verbose=False, warm_up=False):
     batch_size = args.batch_size
     output_dir = args.output_dir
     
-    num_prompts = args.num_prompts
-    cr_depth = args.cr_depth
-    xcr_depth = args.xcr_depth
-    finetune_code = args.finetune_code
-    use_cr_bank = args.use_cr_bank
-    
     print(f"Eval.Dataset: 【{dataset_name}】")
     model = f"{model_name}_patch16_win_dec64_8glb_sl1"
-    args.dst_dir = dst_dir = os.path.join(
-        output_dir, "{}_contexts_{}_crdepth_{}_xcrdepth/{}".format(num_prompts, cr_depth, xcr_depth, args.dataset_name)
-    )
+    args.dst_dir = dst_dir = os.path.join(output_dir, f"{dataset_name}")
     if ddp_utils.get_rank() == 0:
         if not warm_up and not os.path.exists(dst_dir): os.makedirs(dst_dir)
         if verbose: print("output_dir: {}".format(dst_dir))
@@ -330,9 +334,11 @@ def test_one_dataset(args, verbose=False, warm_up=False):
         data_loader_val = DataLoader(dataset_val, batch_size=batch_size, sampler=sampler_val,
                                     drop_last=False, collate_fn=ddp_utils.collate_fn, num_workers=2)
 
-        # load context image-pairs as prompts
-        prompts = args.context_base[dataset_name][:, :, :num_prompts, :, :, :]
-        assert prompts.shape == (batch_size, 2, num_prompts, img_size, img_size, 3)
+        # load context image-pairs as contextst
+        type = batch_size * [dataset_name]
+        c_query = args.context_base[dataset_name][0][:, :args.nci]
+        c_target = args.context_base[dataset_name][1][:, :args.nci]
+        assert c_query.shape == c_target.shape == (batch_size, args.nci, img_size, img_size, 3)
         
         # start running inference for metrics
         model_painter.eval()
@@ -352,7 +358,7 @@ def test_one_dataset(args, verbose=False, warm_up=False):
             assert query.shape == (batch_size, img_size, img_size, 3)
             
             TIME -= time.perf_counter()
-            output = run_one_batch(prompts, query, model_painter, device)
+            output = run_one_batch(type, c_query, c_target, query, model_painter, device)
             TIME += time.perf_counter()
             
             if warm_up: continue
@@ -380,13 +386,8 @@ def test_one_dataset(args, verbose=False, warm_up=False):
         metric_results['time'] = TIME
         if args.test_flops: metric_results['flops'] = flops
         if not args.eval and not warm_up:
-            result_file = os.path.join(dst_dir, "metrics.txt")
+            result_file = os.path.join(output_dir, "metrics.txt")
             with open(result_file, 'a') as f:
-                if not args.use_cr_bank:
-                    print("Without CR-Bank:")
-                    print("Without CR-Bank:", file=f)
-                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:\nDataset: {dataset_name}")
-                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:\nDataset: {dataset_name}", file=f)
                 print(json.dumps(metric_results, indent=4), "\n")
                 print(json.dumps(metric_results, indent=4), "\n", file=f)
 
@@ -408,15 +409,43 @@ def test_one_dataset(args, verbose=False, warm_up=False):
         result_file = os.path.join(output_dir, "metrics.txt")
         if not warm_up:
             with open(result_file, 'a') as f:
-                if not args.use_cr_bank:
-                    print("Without CR-Bank:")
-                    print("Without CR-Bank:", file=f)
-                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:\nDataset: {dataset_name}")
-                print(f"[Hyper] n_context={num_prompts}, cr_depth={cr_depth}, xcr_depth={xcr_depth}, cr_bank={use_cr_bank}, finetune={finetune_code}:\nDataset: {dataset_name}", file=f)
                 print(json.dumps(metric_results, indent=4), "\n")
                 print(json.dumps(metric_results, indent=4), "\n", file=f)
 
     return None if warm_up else metric_results
+
+
+
+def graphing(anchor, metrics, output_dir, num_val):
+    # graph the main metrics statistics: miou, time
+    for dataset in metrics.keys():
+        plt.figure(figsize=(30, 20), dpi=100)
+        plt.style.use('fivethirtyeight')
+        adata, data = anchor[dataset], metrics[dataset]
+        x_labels = np.array(list(adata.keys())+list(data.keys()))
+        x_idx = np.arange(len(x_labels))
+        y_idce = np.array(list(adata.values())+list(data.values()))
+        y_min, y_max = np.min(y_idce), np.max(y_idce)
+        # plt.ylim(y_min-0.1*(y_max-y_min), y_max+0.1*(y_max-y_min))
+        n, w = y_idce.shape[0], 0.75
+        for p in range(len(y_idce)):
+            bias_x_idx = x_idx + w*0.5*(2*p-n+1)/n
+            plt.bar(bias_x_idx, y_idce[p], bottom=0, label="baseline" if not p else "finetuned", width=w/n)
+        
+        plt.legend(loc='best', prop={'size': 30})
+        plt.rcParams.update({'font.size': 30})
+        plt.xticks(x_idx, labels=x_labels, fontsize=27)
+        # plt.yticks(np.linspace(y_min-0.1*(y_max-y_min), y_max+0.1*(y_max-y_min), 20), fontsize=22)
+        plt.yticks(np.linspace(0, y_max+0.1*(y_max-y_min), 20), fontsize=22)
+        plt.grid(True, linestyle='--', alpha=0.5)
+        plt.xlabel("cr_depth ; xcr_depth", fontdict={'size': 30})
+        plt.ylabel(dataset, fontdict={'size': 30})
+        plt.title(f"{dataset.upper()} for [2 context 16:18] val {num_val}", fontdict={'size': 40})
+        plt.tight_layout()
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        plt.savefig(os.path.join(output_dir, f"metrics_{dataset}.jpg"))
+        plt.clf()
 
 
 
@@ -451,8 +480,10 @@ if __name__ == '__main__':
     args = get_args_parser()
     args = ddp_utils.init_distributed_mode(args)
     
-    args.seed = 1
-    args.batch_size = 1
+    INFO = dict()
+    INFO['seed'] = args.seed = 0
+    INFO['num_val'] = args.num_val = 50
+    INFO['use_cache'] = args.use_cache = True
     dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
@@ -461,12 +492,12 @@ if __name__ == '__main__':
         # "derain_image2derain",
         # "ssid_image2denoise",
     ]
-    args.context_base = {dataset_name: get_prompts(args, dataset_name) for dataset_name in dataset_names}
-    
+    args.context_base = {dataset_name: list(get_contexts(args, dataset_name)) for dataset_name in dataset_names}
+    '''
     print("Anchor Test Started: Original Painter")
     args.num_prompts = 1
     args.cr_depth = 0
-    args.xcr_depth = 24
+    args.xcr_depth = 0
     args.finetune_code = None
     args.use_cr_bank = False
     args.num_val = 50
@@ -482,23 +513,30 @@ if __name__ == '__main__':
         print("Anchor Results:", file=f)
         print(json.dumps(anchor, sort_keys=False, indent=4), "\n\n", file=f)
     print("Anchor Test Done!\n")
-    
+    exit(0)
+    '''
     print("Main Test Started:")
-    args.num_prompts = 2
-    args.cr_depth = 16
-    args.xcr_depth = 18
-    args.finetune_code = 1
-    args.use_cr_bank = True
-    args.num_val = 50
-    args.ckpt_path = os.path.join(
-        f"workbench/train_{args.model_name}", \
-        f"Joint_{args.num_prompts}_contexts_{args.cr_depth}_cr_depth_{args.xcr_depth}_xcr_depth_{args.finetune_code}_finetune_code", \
-        "checkpoint-0-30000.pth"
-    )
+    INFO['joint_train'] = args.joint_datasets = True
+    INFO['finetune'] = args.finetune_code = 2
+    INFO['train_mask_ratio'] = args.train_mask_ratio = 0.5
+    INFO['update_momentum_ratio'] = args.mo = 0.9
+    INFO['num_contexts_input'] = args.nci = 3
+    INFO['num_contexts_used'] = args.nc = 3
+    INFO['cr_depth'] = args.cq = 15
+    INFO['xcr_depth'] = args.fcq = 18
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_mo_painter_0/Joint|1:3:15:18|0.9:2:0.5/checkpoint-0-19200.pth"
+    mix_data = "Joint" if args.joint_datasets else "Seperate"
+    args.output_dir = os.path.join(args.output_dir, \
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}|{args.mo}:{args.finetune_code}:{args.train_mask_ratio}")
+    if ddp_utils.get_rank() == 0:   os.makedirs(args.output_dir, exist_ok=True)
+    with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
+        print(json.dumps(INFO, sort_keys=False, indent=4))
+        print(json.dumps(INFO, sort_keys=False, indent=4), file=f)
+    
     metrics = {name: dict() for name in dataset_names}
     for dataset_name in dataset_names:
         args.dataset_name = dataset_name
-        results = test_one_dataset(args)
+        results = test_one_dataset(args, INFO)
         for key in results.keys():
             metrics[dataset_name][key] = results[key]
     
