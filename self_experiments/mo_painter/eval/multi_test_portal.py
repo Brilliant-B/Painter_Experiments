@@ -28,7 +28,7 @@ from util.ddp_utils import DatasetTest
 from util import ddp_utils
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
 
-import models.mo_painter.mo_painter_0 as painter_variant
+import models.mo_painter.mo_painter_2 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -221,11 +221,11 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
         num_contexts=args.nc, 
         cq_depth=args.cq, 
         fcq_depth=args.fcq,
-        momentum_weight=args.mo,
+        context_momentum_weight=args.cmo,
+        query_momentum_weight=args.qmo,
         is_infer=True,
         use_cache=args.use_cache,
-    )
-    model.to("cuda")
+    ).to("cuda")
     assert model.nc % args.batch_size == 0 and model.nc >= args.batch_size, "queue coherence error"
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
     model_without_ddp = model.module
@@ -283,7 +283,7 @@ def run_one_batch(type, c_query, c_target, query, model, device):
     target = torch.zeros_like(query)
     valid = torch.ones_like(target)
     mask = torch.ones(model.module.ori_window_size).repeat(valid.shape[0], 1, 1)
-    _, pred, _ = model(type, c_query.float().to(device), c_target.float().to(device), query.float().to(device), 
+    pred = model(type, c_query.float().to(device), c_target.float().to(device), query.float().to(device), 
                        target.float().to(device), mask.float().to(device), valid.float().to(device))
     output = pred.detach().cpu()
     output = output * imagenet_std + imagenet_mean
@@ -519,15 +519,15 @@ if __name__ == '__main__':
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
     INFO['train_mask_ratio'] = args.train_mask_ratio = 0.5
-    INFO['update_momentum_ratio'] = args.mo = 0.9
-    INFO['num_contexts_input'] = args.nci = 3
-    INFO['num_contexts_used'] = args.nc = 3
+    INFO['context_momentum_weight'] = args.cmo = 0.0
+    INFO['query_momentum_weight'] = args.qmo = 1.0
+    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 3
     INFO['cr_depth'] = args.cq = 15
     INFO['xcr_depth'] = args.fcq = 18
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_mo_painter_0/Joint|1:3:15:18|0.9:2:0.5/checkpoint-0-19200.pth"
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_mo_painter_2/Joint|1:3:15:18:1.0:0.0|2:0.5/checkpoint-0-32000.pth"
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}|{args.mo}:{args.finetune_code}:{args.train_mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}:{args.qmo}:{args.cmo}|{args.finetune_code}:{args.train_mask_ratio}")
     if ddp_utils.get_rank() == 0:   os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
         print(json.dumps(INFO, sort_keys=False, indent=4))

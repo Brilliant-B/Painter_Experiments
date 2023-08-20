@@ -527,11 +527,13 @@ class Painter_Varient(nn.Module):
         
         if self.is_infer and self.cache is not None:    c, c_latent = self.cache_sampling(C)
         else:   c, c_latent = self.context_queue_sampling(type, B, C)
+        
+        # TODO Prototype Context-Former
+        
         if x_latent is not None:
             x_latent = torch.cat([c_latent, x_latent], dim=1) # [B, 2*Hp, Wp, nl*C]
         x = torch.cat([c, x], dim=1) # [B, (n+1)*Hp, Wp, C]
         assert x.shape == (B, (self.nc + 1) * Hp, Wp, C), "contexts feature load error"
-        
         x, f_latent = self.fcq_encoder(x, B, Hp, Wp, C)
         p, q = x.split([self.nc * Hp, Hp], dim=1)
         p = p.reshape(B, self.nc, Hp, Wp, C).mean(1)
@@ -604,7 +606,7 @@ class Painter_Varient(nn.Module):
             return loss, pred, image_mask
 
 
-def mo_painter_2_patch16_win_dec64_8glb_sl1(**kwargs):
+def proto_mo_0_patch16_win_dec64_8glb_sl1(**kwargs):
     model = Painter_Varient(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

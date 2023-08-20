@@ -180,9 +180,10 @@ def prepare_model(args, prints=False):
         seed=args.seed,
         datasets=args.datasets_weights.keys(),
         num_contexts_in=args.nci,
-        num_contexts=args.nc, 
+        num_contexts=args.nc,
         cq_depth=args.cq,
         fcq_depth=args.fcq,
+        encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
         dataset_loss_weight=args.datasets_weights,
@@ -220,6 +221,7 @@ def prepare_model(args, prints=False):
         
         # load pre-trained model
         msg = model.load_state_dict(checkpoint, strict=False)
+        if args.emo > 0.0: model.init_cm_encoder()
         if prints:  print(msg)
         
         # freeze part of the modules
@@ -300,7 +302,7 @@ def main(args, INFO):
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     output_dir = args.output_dir = os.path.join(args.base_output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}:{args.qmo}:{args.cmo}|{args.finetune_code}:{args.mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}:{args.qmo}:{args.cmo}:{args.emo}|{args.finetune_code}:{args.mask_ratio}")
     train_log_dir = os.path.join(output_dir, "train_log.log")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print('output_dir: {}'.format(output_dir))
@@ -411,9 +413,7 @@ def main(args, INFO):
             global_rank=global_rank,
             args=args,
         )
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        # **{f'test_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch,}
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, 'epoch': epoch,}
         if output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
@@ -438,12 +438,12 @@ if __name__ == '__main__':
     
     INFO = dict()
     INFO['seed'] = args.seed = 0
-    INFO['save_freq'] = args.save_itrs = 10400
+    INFO['save_freq'] = args.save_itrs = 8000
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
-        "ade20k_image2semantic": 1.5,
-        "coco_image2panoptic_sem_seg": 2,
-        "nyuv2_image2depth": 1.2,
-        "lol_image2enhance": 1,
+        "ade20k_image2semantic": 20,
+        "coco_image2panoptic_sem_seg": 25, 
+        "nyuv2_image2depth": 15,
+        "lol_image2enhance": 12,
         # "derain_image2derain": 1,
         # "ssid_image2denoise": 1,
     }
@@ -457,8 +457,10 @@ if __name__ == '__main__':
     INFO['finetune'] = args.finetune_code = 2
     INFO['mask_ratio'] = args.mask_ratio = 0.5
     
-    INFO['context_momentum_weight'] = args.cmo = 0.0
-    INFO['query_momentum_weight'] = args.qmo = 0.2
+    INFO['encoder_momentum_weight'] = args.emo = 0.9
+    INFO['context_momentum_weight'] = args.cmo = 0
+    INFO['query_momentum_weight'] = args.qmo = 1
+    
     INFO['num_contexts_input'] = args.nci = 1
     INFO['num_contexts_used'] = args.nc = 3
     INFO['cr_depth'] = args.cq = 15

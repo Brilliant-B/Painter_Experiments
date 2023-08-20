@@ -41,8 +41,7 @@ def train_one_epoch(model: torch.nn.Module,
     metric_logger = misc.MetricLogger(delimiter="  ", log_file=log_file)
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 32
-    accum_iter = args.accum_iter
+    print_freq = accum_iter = args.accum_iter
     if log_writer is not None:
         print('tensorboard_log_dir: {}'.format(log_writer.log_dir))
 
@@ -78,6 +77,7 @@ def train_one_epoch(model: torch.nn.Module,
                                     update_grad=(data_iter_step + 1) % accum_iter == 0)
             if (data_iter_step + 1) % accum_iter == 0:
                 optimizer.zero_grad()
+                if args.emo > 0.0: model_without_ddp.momentum_update_cm_encoder()
             loss_scale_value = loss_scaler.state_dict()["scale"]
 
         torch.cuda.synchronize()
@@ -122,6 +122,7 @@ def train_one_epoch(model: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
+'''
 @torch.no_grad()
 def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=None):
     metric_logger = misc.MetricLogger(delimiter="  ")
@@ -129,7 +130,6 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
     # switch to evaluation mode
     model.eval()
     wandb_images = []
-    model.use_cr_bank = True
     for prompts, query, target, mask, valid in metric_logger.log_every(data_loader, 50, header):
         prompts = prompts.to(device, non_blocking=True)
         query = query.to(device, non_blocking=True)
@@ -149,7 +149,6 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
             frame = torch.cat((x, msk_label, y, label), dim=2)[0]
             frame = torch.clip((frame * imagenet_std + imagenet_mean) * 255, 0, 255).int()
             wandb_images.append(wandb.Image(frame.numpy(), caption="query; masked_label; pred; label"))
-    model.use_cr_bank = False
     
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -160,3 +159,4 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
         if len(wandb_images) > 0:
             wandb.log({"Testing examples": wandb_images[::2][:20]})
     return out
+'''
