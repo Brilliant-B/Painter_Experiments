@@ -1,5 +1,5 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1,"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
 import sys
 sys.path.append(r'/root/autodl-tmp/Painter/')
 import argparse
@@ -25,7 +25,7 @@ import util.lr_decay as lrd
 import util.misc as misc
 from util.misc import get_parameter_groups
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
-from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
+from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
 from data.pairdataset_variant import PairDataset
 from util.ddp_utils import DatasetTest
 from torch.utils.data import DataLoader
@@ -34,8 +34,8 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.mo_painter.mo_painter_2 as painter_variant
-from self_experiments.mo_painter.finetune.engine_train import train_one_epoch
+import models.proto_mo.proto_mo_2 as painter_variant
+from self_experiments.proto_mo.finetune.engine_train import train_one_epoch
 
 TRAIN_JSON_BANK = {
     "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
@@ -182,10 +182,11 @@ def prepare_model(args, prints=False):
         num_contexts_in=args.nci,
         num_contexts=args.nc,
         cq_depth=args.cq,
-        fcq_depth=args.fcq,
+        p_depth=args.p,
         encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
+        use_attn_mean=args.use_attn_mean,
         dataset_loss_weight=args.datasets_weights,
         is_infer=False,
     ).to("cuda")
@@ -194,7 +195,7 @@ def prepare_model(args, prints=False):
         checkpoint = torch.load(args.finetune, map_location='cpu')['model']    
         # interpolate position embedding
         interpolate_pos_embed(model, checkpoint)
-        interpolate_rel_pos_embed(model, checkpoint)
+        interpolate_rel_pos_embed_proto_mo(model, checkpoint)
         # interpolate patch embedding
         if "patch32" in args.model:
             patch_weight = checkpoint['patch_embed.proj.weight']
@@ -209,7 +210,7 @@ def prepare_model(args, prints=False):
         finetune_code, freeze_list = args.finetune_code, []
         if finetune_code < 3:
             freeze_list.append("decoder*")
-            code2layers = [model.cq, model.fcq, model.depth]
+            code2layers = [0, model.cq, model.depth]
             for l in range(model.depth):
                 if l >= code2layers[finetune_code]:
                     freeze_list.append(f"blocks.{l}.*")
@@ -250,10 +251,10 @@ def prepare_data(args, prints=False):
     transform_train_seccrop = pair_transforms.Compose([
             pair_transforms.RandomResizedCrop(args.img_size, scale=(args.min_random_scale, 1.0), ratio=(0.3, 0.7), interpolation=3),  # 3 is bicubic
             ])
-    transform_val = pair_transforms.Compose([
-            pair_transforms.RandomResizedCrop(args.img_size[1], scale=(0.9999, 1.0), interpolation=3),  # 3 is bicubic
-            pair_transforms.ToTensor(),
-            pair_transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    # transform_val = pair_transforms.Compose([
+    #         pair_transforms.RandomResizedCrop(args.img_size[1], scale=(0.9999, 1.0), interpolation=3),  # 3 is bicubic
+    #         pair_transforms.ToTensor(),
+    #         pair_transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
     masked_position_generator = MaskingGenerator(
         args.window_size, num_masking_patches=args.num_mask_patches,
@@ -302,7 +303,7 @@ def main(args, INFO):
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     output_dir = args.output_dir = os.path.join(args.base_output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}:{args.qmo}:{args.cmo}:{args.emo}|{args.finetune_code}:{args.mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.p}:{args.qmo}:{args.cmo}:{args.emo}|{args.finetune_code}:{args.mask_ratio}")
     train_log_dir = os.path.join(output_dir, "train_log.log")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print('output_dir: {}'.format(output_dir))
@@ -455,20 +456,22 @@ if __name__ == '__main__':
 
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
-    INFO['mask_ratio'] = args.mask_ratio = 0.5
+    INFO['mask_ratio'] = args.mask_ratio = 0.75
     
-    INFO['encoder_momentum_weight'] = args.emo = 0.9
-    INFO['context_momentum_weight'] = args.cmo = 0
-    INFO['query_momentum_weight'] = args.qmo = 1
+    INFO['use_attn_mean'] = args.use_attn_mean = False
+    INFO['encoder_momentum_weight'] = args.emo = 0.99
+    INFO['context_momentum_weight'] = args.cmo = 0.0 # fully context update
+    INFO['query_momentum_weight'] = args.qmo = 1.0 # no query update
     
     INFO['num_contexts_input'] = args.nci = 1
     INFO['num_contexts_used'] = args.nc = 3
     INFO['cr_depth'] = args.cq = 15
-    INFO['xcr_depth'] = args.fcq = 18
+    INFO['p_depth'] = args.p = 1
     
     INFO['batch_size'] = args.batch_size = 2
-    INFO['accum_iter'] = args.accum_iter = 32
-    INFO['learning_rate'] = args.lr = 1e-4
-    INFO['warmup_itrs'] = args.warmup_itrs = 2048
+    INFO['accum_iter'] = args.accum_iter = 64
+    INFO['learning_rate'] = args.lr = 1e-4 # 1e-5
+    INFO['warmup_itrs'] = args.warmup_itrs = 2048 # 512
+    # INFO['pretrained'] = args.finetune = "workbench/train_proto_mo_1/Joint|1:3:15:0:1.0:0.0:0.99|2:0.75/checkpoint-0-24000.pth"
     
     main(args, INFO)

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
+import random
 
 import fvcore.nn.weight_init as weight_init
 from detectron2.layers import CNNBlockBase, Conv2d, get_norm
@@ -17,6 +18,52 @@ from util.vitdet_utils import (
     window_unpartition,
     LayerNorm2D,
 )
+
+
+class Class_Attention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.k = nn.Linear(dim, dim, bias=qkv_bias)
+        self.v = nn.Linear(dim, dim, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, cls, pch):
+        B, Hp, Wp, C = cls.shape
+        x = torch.cat([cls, pch], dim=1)
+        q = self.q(cls).reshape(B, Hp * Wp, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3) * self.scale
+        k = self.k(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3)
+        v = self.v(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3)
+        attn = q @ k.transpose(-2, -1)
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x_cls = (attn @ v).view(self.num_heads, B, Hp, Wp, -1).permute(1, 2, 3, 0, 4).reshape(B, Hp, Wp, -1)
+        x_cls = self.proj(x_cls)
+        x_cls = self.proj_drop(x_cls)
+        return x_cls
+
+
+
+class CA_Block(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.attn = Class_Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.norm2 = norm_layer(dim)
+        self.mlp = Mlp(in_features=dim, hidden_features=int(dim*mlp_ratio), act_layer=act_layer, drop=drop)
+    
+    def forward(self, cls, pch):
+        cls = cls + self.drop_path(self.attn(self.norm1(cls), self.norm1(pch)))
+        cls = cls + self.drop_path(self.mlp(self.norm2(cls)))
+        return cls
+
 
 
 class Attention(nn.Module):
@@ -55,7 +102,7 @@ class Attention(nn.Module):
                 trunc_normal_(self.rel_pos_h, std=0.02)
                 trunc_normal_(self.rel_pos_w, std=0.02)
 
-    def forward(self, x, parallel_batch=True):
+    def forward(self, x):
         B, H, W, _ = x.shape
         # qkv with shape (3, nHead, B, H * W, C)
         qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 3, 0, 1, 4)
@@ -146,6 +193,7 @@ class Block(nn.Module):
         window_size=0,
         use_residual_block=False,
         input_size=None,
+        use_cait=False,
     ):
         """
         Args:
@@ -189,6 +237,7 @@ class Block(nn.Module):
                 norm="LN",
                 act_layer=act_layer,
             )
+        self.use_cait = use_cait
 
     def forward(self, x):
         ori_shape = x.shape
@@ -227,11 +276,12 @@ class Painter_Varient(nn.Module):
             datasets=None,
             num_contexts_in=1,
             num_contexts=3,
-            cq_depth=12,
-            fcq_depth=12,
+            cq_depth=15,
+            p_depth=2,
             encoder_momentum_weight=0.0,
             context_momentum_weight=0.2,
             query_momentum_weight=1.0,
+            use_attn_mean = True,
             dataset_loss_weight=None,
             is_infer=False,
             use_cache=True,
@@ -259,6 +309,7 @@ class Painter_Varient(nn.Module):
         self.seed = seed
         self.is_infer = is_infer
         self.use_cache = use_cache
+        self.use_attn_mean = use_attn_mean
         self.img_size = img_size
         self.ori_window_size = (img_size[0] // patch_size, img_size[1] // patch_size)
         self.pretrain_use_cls_token = pretrain_use_cls_token
@@ -284,12 +335,14 @@ class Painter_Varient(nn.Module):
         if self.is_infer:   assert self.nci == self.nc
         else:   assert self.nci <= self.nc and self.nc % self.nci == 0
         self.cq = cq_depth
-        self.fcq = fcq_depth
-        assert self.cq <= self.fcq <= self.depth
+        self.p = p_depth
+        assert self.cq <= self.depth
         
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_x = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_y = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
+        if not self.use_attn_mean:
+            self.prototype_tokens = nn.Parameter(torch.zeros(1, *self.ori_window_size, self.embed_dim))
 
         if use_abs_pos:
             # Initialize absolute positional embedding with pretrain image size.
@@ -335,9 +388,9 @@ class Painter_Varient(nn.Module):
                         use_residual_block=i in residual_block_indexes,
                         input_size=input_size,
                     )
+                    if use_act_checkpoint:
+                        cm_block = checkpoint_wrapper(cm_block)
                     self.cm_blocks.append(cm_block)
-            elif i < self.fcq:
-                input_size = ((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1])
             else:
                 input_size = (2 * self.ori_window_size[0], self.ori_window_size[1])
             block = Block(
@@ -357,6 +410,22 @@ class Painter_Varient(nn.Module):
             if use_act_checkpoint:
                 block = checkpoint_wrapper(block)
             self.blocks.append(block)
+            
+        self.p_blocks = nn.ModuleList()
+        for i in range(self.p):
+            input_size = ((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1])
+            block = CA_Block(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=0.,
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+            )
+            if use_act_checkpoint:
+                block = checkpoint_wrapper(block)
+            self.p_blocks.append(block)
 
         if self.pos_embed is not None:
             trunc_normal_(self.pos_embed, std=0.02)
@@ -379,6 +448,8 @@ class Painter_Varient(nn.Module):
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.segment_token_x, std=.02)
         torch.nn.init.normal_(self.segment_token_y, std=.02)
+        if not self.use_attn_mean:
+            torch.nn.init.normal_(self.prototype_tokens, std=.1)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -428,20 +499,14 @@ class Painter_Varient(nn.Module):
         x_latent = None if len(x_latent) == 0 else torch.cat(x_latent, dim=-1)
         return x, x_latent
     
-    def fcq_encoder(self, x, B, Hp, Wp, C):
-        f_latent = []
-        for idx in range(self.cq, self.fcq):
-            x = self.blocks[idx](x)
-            if idx + 1 in self.encoder_sampling:
-                p, q = x.split([self.nc * Hp, Hp], dim=1)
-                p = p.reshape(B, self.nc, Hp, Wp, C).mean(1)
-                q = torch.cat([p, q], dim=1)
-                f_latent.append(self.norm(q))
-        return x, f_latent
+    def proto_cait(self, cls, pch):
+        for idx in range(self.p):
+            cls = self.p_blocks[idx](cls, pch)
+        return cls
     
     def kn_encoder(self, x):
         latent = []
-        for idx in range(self.fcq, 24):
+        for idx in range(self.cq, 24):
             x = self.blocks[idx](x)
             if idx + 1 in self.encoder_sampling:
                 latent.append(self.norm(x))
@@ -457,7 +522,6 @@ class Painter_Varient(nn.Module):
     def cache_sampling(self, C):
         cache = self.cache.cuda()
         c_latent, c = cache.split([self.nl * C, C], dim=-1)
-        c = c.flatten(1, 2)
         c_latent = None if c_latent.shape[-1] == 0 else c_latent.mean(1)
         return c, c_latent  # [B, nc*Hp, Wp, C] [B, Hp, Wp, nl*C]
     
@@ -485,15 +549,18 @@ class Painter_Varient(nn.Module):
     @torch.no_grad()
     def context_queue_sampling(self, type, B, C):
         c, c_latent = [], []
+        n = random.randint(1, self.nc)
         for i in range(B):
+            # idx = random.choices(range(self.nc), k=n)
+            # ic = torch.stack([self.queues[type[i]][j].cuda() for j in idx], dim=0)
             ic = self.queues[type[i]].cuda()
             ic_latent, ic = ic.split([self.nl * C, C], dim=-1)
-            c.append(ic.flatten(0, 1))
+            c.append(ic)
             if ic_latent.shape[-1] != 0:
                 c_latent.append(ic_latent.mean(0))
         c = torch.stack(c, dim=0)
         c_latent = None if len(c_latent) == 0 else torch.stack(c_latent, dim=0)
-        return c, c_latent  # [B, nc*Hp, Wp, C] [B, Hp, Wp, nl*C]
+        return c, c_latent  # [B, nc, Hp, Wp, C] [B, Hp, Wp, nl*C]
     
     
     def forward_encoder(self, type, c_query, c_target, query, target, mask):
@@ -508,9 +575,9 @@ class Painter_Varient(nn.Module):
         if self.pos_embed is not None:
             x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
         x, x_latent = self.cq_encoder(x)
-        assert x.shape == (B, Hp, Wp, C), x_latent.shape == (B, Hp, Wp, self.nl * C)
+        assert x.shape == (B, Hp, Wp, C) # x_latent.shape == (B, Hp, Wp, self.nl * C)
         
-        if (not self.is_infer and self.cmo < 1.0) or (self.is_infer and self.use_cache and self.cache is None):
+        if (not self.is_infer and self.cmo < 1.0) or (self.is_infer and (not self.use_cache or self.cache is None)):
             c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
             c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
             co = self.patch_embed(co.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
@@ -519,29 +586,28 @@ class Painter_Varient(nn.Module):
             if self.pos_embed is not None:
                 c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
             c, c_latent = self.cm_encoder(c) if self.emo > 0.0 else self.cq_encoder(c)
-            assert c.shape == (B, self.nci, Hp, Wp, C) and c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) and len(type) == B
-            if self.is_infer:   self.cache_storage(c, c_latent)
-            else:   self.queue_cmo_update(type, c, c_latent)
-        if not self.is_infer and self.qmo < 1.0:
-            self.queue_qmo_update(type, x, x_latent)
+            assert c.shape == (B, self.nci, Hp, Wp, C) and len(type) == B # c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) 
+            if not self.is_infer:   self.queue_cmo_update(type, c, c_latent)
+            else:   self.cache_storage(c, c_latent)
+        if not self.is_infer:
+            if self.qmo < 1.0:  self.queue_qmo_update(type, x, x_latent)
+            c, c_latent = self.context_queue_sampling(type, B, C)
+        elif self.use_cache and self.cache is not None:
+            c, c_latent = self.cache_sampling(C)
         
-        if self.is_infer and self.cache is not None:    c, c_latent = self.cache_sampling(C)
-        else:   c, c_latent = self.context_queue_sampling(type, B, C)
-
-        x = torch.cat([c, x], dim=1) # [B, (n+1)*Hp, Wp, C]
-        assert x.shape == (B, (self.nc + 1) * Hp, Wp, C), "contexts feature load error"
+        if self.use_attn_mean:  p = torch.mean(c, dim=1)
+        else:   p = self.prototype_tokens.repeat(B, 1, 1, 1)
+        c = c.flatten(1, 2).repeat(2, 1, 1, 1) # add query interaction
+        x = torch.cat([p, x], dim=0)
+        p, x = self.proto_cait(x, c).split([B, B], dim=0)
         
-        x, f_latent = self.fcq_encoder(x, B, Hp, Wp, C)
-        p, q = x.split([self.nc * Hp, Hp], dim=1)
-        p = p.reshape(B, self.nc, Hp, Wp, C).mean(1)
-        x = torch.cat([p, q], dim=1)
-        assert x.shape == (B, 2 * Hp, Wp, C), "averaging contexts error"
-        
+        x = torch.cat([p, x], dim=1)
+        assert x.shape == (B, 2 * Hp, Wp, C)
         latent = self.kn_encoder(x)
-        latent = torch.cat(f_latent + latent, dim=-1)
         if x_latent is not None:
+            if self.is_infer and not self.use_cache:    c_latent = c_latent.mean(1)
             x_latent = torch.cat([c_latent, x_latent], dim=1) # [B, 2*Hp, Wp, nl*C]
-            latent = torch.cat([x_latent, latent], dim=-1)
+            latent = torch.cat([x_latent] + latent, dim=-1)
         assert latent.shape == (B, 2 * Hp, Wp, 4 * C)
         return latent
 
@@ -604,7 +670,7 @@ class Painter_Varient(nn.Module):
             return loss, pred, image_mask
 
 
-def mo_painter_2_patch16_win_dec64_8glb_sl1(**kwargs):
+def proto_mo_2_patch16_win_dec64_8glb_sl1(**kwargs):
     model = Painter_Varient(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

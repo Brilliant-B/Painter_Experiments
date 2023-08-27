@@ -28,7 +28,7 @@ from util.ddp_utils import DatasetTest
 from util import ddp_utils
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
 
-import models.painter_variant_2 as painter_variant
+import models.painter_variants.painter_variant_2 as painter_variant
 
 
 
@@ -498,8 +498,8 @@ if __name__ == '__main__':
     
     print("Anchor Test Started: Original Painter")
     args.num_prompts = 1
-    args.cr_depth = 0
-    args.xcr_depth = 0
+    args.cr_depth = 15
+    args.xcr_depth = 15
     args.finetune_code = None
     args.use_cr_bank = False
     args.num_val = 50
@@ -519,8 +519,8 @@ if __name__ == '__main__':
     
     print("Main Test Started:")
     args.num_prompts = 1
-    args.cr_depth = 9
-    args.xcr_depth = 12
+    args.cr_depth = 15
+    args.xcr_depth = 15
     args.finetune_code = 1
     args.use_cr_bank = True
     args.num_val = 50

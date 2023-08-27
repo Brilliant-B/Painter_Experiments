@@ -26,9 +26,9 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from util.ddp_utils import DatasetTest
 from util import ddp_utils
-from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed
+from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
 
-import models.mo_painter.mo_painter_2 as painter_variant
+import models.proto_mo.proto_mo_2 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -220,7 +220,8 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
         num_contexts_in=args.nci,
         num_contexts=args.nc,
         cq_depth=args.cq,
-        fcq_depth=args.fcq,
+        p_depth=args.p,
+        use_attn_mean=args.use_attn_mean,
         encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
@@ -248,14 +249,16 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     # load checkpoint and interpolate
     checkpoint = torch.load(args.ckpt_path, map_location='cpu')['model']
     interpolate_pos_embed(model_without_ddp, checkpoint)
-    interpolate_rel_pos_embed(model_without_ddp, checkpoint)
+    interpolate_rel_pos_embed_proto_mo(model_without_ddp, checkpoint)
     
     if "vit" in args.ckpt_path:    
         msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
         model_without_ddp.init_cm_encoder()
     else:
         msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
-    
+
+    # for k in checkpoint:
+    #     print(k)    
     if prints:
         print(msg)
         print("Model Loaded.")
@@ -519,17 +522,22 @@ if __name__ == '__main__':
     print("Main Test Started:")
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
-    INFO['train_mask_ratio'] = args.train_mask_ratio = 0.5
-    INFO['encoder_momentum_weight'] = args.emo = 0.9
+    INFO['train_mask_ratio'] = args.train_mask_ratio = 0.75
+    INFO['train_batch_size'] = args.train_batch_size = 128
+    
+    INFO['use_attn_mean'] = args.use_attn_mean = False
+    INFO['encoder_momentum_weight'] = args.emo = 0.99
     INFO['context_momentum_weight'] = args.cmo = 0.0
     INFO['query_momentum_weight'] = args.qmo = 1.0
+    
     INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 3
     INFO['cr_depth'] = args.cq = 15
-    INFO['xcr_depth'] = args.fcq = 18
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_mo_painter_2/Joint|1:3:15:18:1:0:0.9|2:0.5/checkpoint-0-16000.pth"
+    INFO['p_depth'] = args.p = 1
+    # INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:3:15:1:1.0:0.0:0.99|2:0.75/checkpoint-0-40000.pth"
+    
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.fcq}:{args.qmo}:{args.cmo}|{args.finetune_code}:{args.train_mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.p}:{args.qmo}:{args.cmo}:{args.emo}|{args.finetune_code}:{args.train_mask_ratio}")
     if ddp_utils.get_rank() == 0:   os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
         print(json.dumps(INFO, sort_keys=False, indent=4))

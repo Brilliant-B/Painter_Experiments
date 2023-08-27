@@ -1,0 +1,25 @@
+{
+    "seed": 0,
+    "save_freq": 6400,
+    "datasets_weights": {
+        "ade20k_image2semantic": 20,
+        "coco_image2panoptic_sem_seg": 25,
+        "nyuv2_image2depth": 15,
+        "lol_image2enhance": 12
+    },
+    "joint_train": true,
+    "finetune": 2,
+    "mask_ratio": 0.8,
+    "use_attn_mean": false,
+    "encoder_momentum_weight": 0.9,
+    "context_momentum_weight": 0.0,
+    "query_momentum_weight": 1.0,
+    "num_contexts_input": 1,
+    "num_contexts_used": 5,
+    "cr_depth": 15,
+    "p_depth": 2,
+    "batch_size": 2,
+    "accum_iter": 32,
+    "learning_rate": 0.0001,
+    "warmup_itrs": 2048
+}
