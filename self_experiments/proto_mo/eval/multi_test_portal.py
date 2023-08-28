@@ -224,6 +224,7 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
         encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
+        skip_query=args.skip_query,
         use_attn_mean=args.use_attn_mean,
         use_random_nc=args.use_random_nc,
         is_infer=True,
@@ -520,12 +521,13 @@ if __name__ == '__main__':
     exit(0)
     '''
     print("Main Test Started:")
-    INFO['num_val'] = args.num_val = None
+    INFO['num_val'] = args.num_val = 50
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
-    INFO['train_mask_ratio'] = args.train_mask_ratio = 0.9 # 0.99
+    INFO['train_mask_ratio'] = args.train_mask_ratio = 0.99 # 0.9
     INFO['train_batch_size'] = args.train_batch_size = 128
     
+    INFO['skip_query'] = args.skip_query = False
     INFO['use_attn_mean'] = args.use_attn_mean = True
     INFO['use_random_nc'] = args.use_random_nc = False
     INFO['encoder_momentum_weight'] = args.emo = 0.99
@@ -536,7 +538,7 @@ if __name__ == '__main__':
     INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 5
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:5:15:1:1.0:0.0:0.99|2:0.9/checkpoint-0-54916.pth"
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:5:15:1:1.0:0.0:0.99|2:0.99/checkpoint-1-32000.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \

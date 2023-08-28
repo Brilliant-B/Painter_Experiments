@@ -186,6 +186,7 @@ def prepare_model(args, prints=False):
         encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
+        skip_query=args.skip_query,
         use_attn_mean=args.use_attn_mean,
         use_random_nc=args.use_random_nc,
         dataset_loss_weight=args.datasets_weights,
@@ -465,6 +466,7 @@ if __name__ == '__main__':
     INFO['finetune'] = args.finetune_code = 2
     INFO['mask_ratio'] = args.mask_ratio = 0.99 # 0.9
     
+    INFO['skip_query'] = args.skip_query = False
     INFO['use_attn_mean'] = args.use_attn_mean = True
     INFO['use_random_nc'] = args.use_random_nc = False
     INFO['encoder_momentum_weight'] = args.emo = 0.99

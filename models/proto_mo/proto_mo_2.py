@@ -281,6 +281,7 @@ class Painter_Varient(nn.Module):
             encoder_momentum_weight=0.0,
             context_momentum_weight=0.2,
             query_momentum_weight=1.0,
+            skip_query=False,
             use_attn_mean=True,
             use_random_nc=False,
             dataset_loss_weight=None,
@@ -310,6 +311,7 @@ class Painter_Varient(nn.Module):
         self.seed = seed
         self.is_infer = is_infer
         self.use_cache = use_cache
+        self.skip_query = skip_query
         self.use_attn_mean = use_attn_mean
         self.use_random_nc = use_random_nc
         self.img_size = img_size
@@ -517,6 +519,7 @@ class Painter_Varient(nn.Module):
     @torch.no_grad()
     def cache_storage(self, c, c_latent):
         if c_latent is not None:
+            if self.skip_query: c_latent = c_latent.mean(1)
             c = torch.cat([c_latent, c], dim=-1)
         self.cache = c.cpu()
     
@@ -524,7 +527,7 @@ class Painter_Varient(nn.Module):
     def cache_sampling(self, C):
         cache = self.cache.cuda()
         c_latent, c = cache.split([self.nl * C, C], dim=-1)
-        c_latent = None if c_latent.shape[-1] == 0 else c_latent.mean(1)
+        c_latent = None if c_latent.shape[-1] == 0 else c_latent if self.skip_query else c_latent.mean(1)
         return c, c_latent  # [B, nc*Hp, Wp, C] [B, Hp, Wp, nl*C]
     
     @torch.no_grad() # cmo_former
@@ -591,18 +594,27 @@ class Painter_Varient(nn.Module):
             c, c_latent = self.cm_encoder(c) if self.emo > 0.0 else self.cq_encoder(c)
             assert c.shape == (B, self.nci, Hp, Wp, C) and len(type) == B # c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) 
             if not self.is_infer:   self.queue_cmo_update(type, c, c_latent)
-            else:   self.cache_storage(c, c_latent)
+            elif not self.skip_query:   self.cache_storage(c, c_latent)
         if not self.is_infer:
             if self.qmo < 1.0:  self.queue_qmo_update(type, x, x_latent)
             c, c_latent = self.context_queue_sampling(type, B, C)
-        elif self.use_cache and self.cache is not None:
+        elif not self.skip_query and self.use_cache and self.cache is not None:
             c, c_latent = self.cache_sampling(C)
         
-        if self.use_attn_mean:  p = torch.mean(c, dim=1)
-        else:   p = self.prototype_tokens.repeat(B, 1, 1, 1)
-        c = c.flatten(1, 2).repeat(2, 1, 1, 1) # add query interaction
-        x = torch.cat([p, x], dim=0)
-        p, x = self.proto_cait(x, c).split([B, B], dim=0)
+        if self.skip_query:
+            if not self.is_infer or not self.use_cache or self.cache is None:
+                if self.use_attn_mean:  p = torch.mean(c, dim=1)
+                else:   p = self.prototype_tokens.repeat(B, 1, 1, 1)
+                c = c.flatten(1, 2)
+                p = self.proto_cait(p, c)
+                if self.is_infer and self.use_cache:   self.cache_storage(p, c_latent)
+            if self.is_infer and self.use_cache:    p, c_latent = self.cache_sampling(C)
+        else:
+            if self.use_attn_mean:  p = torch.mean(c, dim=1)
+            else:   p = self.prototype_tokens.repeat(B, 1, 1, 1)
+            c = c.flatten(1, 2).repeat(2, 1, 1, 1) # add query interaction
+            x = torch.cat([p, x], dim=0)
+            p, x = self.proto_cait(x, c).split([B, B], dim=0)
         
         x = torch.cat([p, x], dim=1)
         assert x.shape == (B, 2 * Hp, Wp, C)
