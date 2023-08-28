@@ -9,8 +9,7 @@ python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12
     --accum_iter 32 \
     --model_name $name \
     --model ${name}_patch16_win_dec64_8glb_sl1 \
-    --max_mask_patches_per_block 392 \
-    --epochs 1 \
+    --epochs 3 \
     --warmup_itrs 1000 \
     --lr 5e-4 \
     --clip_grad 3 \

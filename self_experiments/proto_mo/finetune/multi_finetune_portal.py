@@ -187,6 +187,7 @@ def prepare_model(args, prints=False):
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
         use_attn_mean=args.use_attn_mean,
+        use_random_nc=args.use_random_nc,
         dataset_loss_weight=args.datasets_weights,
         is_infer=False,
     ).to("cuda")
@@ -439,7 +440,6 @@ if __name__ == '__main__':
     
     INFO = dict()
     INFO['seed'] = args.seed = 0
-    INFO['save_freq'] = args.save_itrs = 8000
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
         "ade20k_image2semantic": 20,
         "coco_image2panoptic_sem_seg": 25,
@@ -454,24 +454,28 @@ if __name__ == '__main__':
         val_json_path.append(os.path.join(args.data_path, VAL_JSON_BANK[dataset_name]))
     args.json_path, args.val_json_path = json_path, val_json_path
 
+    INFO['epochs'] = args.epochs = 2
+    INFO['save_freq'] = args.save_itrs = 16000
+    INFO['batch_size'] = args.batch_size = 2
+    INFO['accum_iter'] = args.accum_iter = 64
+    INFO['learning_rate'] = args.lr = 1e-4
+    INFO['warmup_itrs'] = args.warmup_itrs = 2048
+    
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
-    INFO['mask_ratio'] = args.mask_ratio = 0.75
+    INFO['mask_ratio'] = args.mask_ratio = 0.99 # 0.9
     
-    INFO['use_attn_mean'] = args.use_attn_mean = False
+    INFO['use_attn_mean'] = args.use_attn_mean = True
+    INFO['use_random_nc'] = args.use_random_nc = False
     INFO['encoder_momentum_weight'] = args.emo = 0.99
     INFO['context_momentum_weight'] = args.cmo = 0.0 # fully context update
     INFO['query_momentum_weight'] = args.qmo = 1.0 # no query update
     
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['num_contexts_used'] = args.nc = 3
+    INFO['num_contexts_used'] = args.nc = 5
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
     
-    INFO['batch_size'] = args.batch_size = 2
-    INFO['accum_iter'] = args.accum_iter = 64
-    INFO['learning_rate'] = args.lr = 1e-4 # 1e-5
-    INFO['warmup_itrs'] = args.warmup_itrs = 2048 # 512
     # INFO['pretrained'] = args.finetune = "workbench/train_proto_mo_1/Joint|1:3:15:0:1.0:0.0:0.99|2:0.75/checkpoint-0-24000.pth"
     
     main(args, INFO)

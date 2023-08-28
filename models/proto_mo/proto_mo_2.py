@@ -281,7 +281,8 @@ class Painter_Varient(nn.Module):
             encoder_momentum_weight=0.0,
             context_momentum_weight=0.2,
             query_momentum_weight=1.0,
-            use_attn_mean = True,
+            use_attn_mean=True,
+            use_random_nc=False,
             dataset_loss_weight=None,
             is_infer=False,
             use_cache=True,
@@ -310,6 +311,7 @@ class Painter_Varient(nn.Module):
         self.is_infer = is_infer
         self.use_cache = use_cache
         self.use_attn_mean = use_attn_mean
+        self.use_random_nc = use_random_nc
         self.img_size = img_size
         self.ori_window_size = (img_size[0] // patch_size, img_size[1] // patch_size)
         self.pretrain_use_cls_token = pretrain_use_cls_token
@@ -551,9 +553,10 @@ class Painter_Varient(nn.Module):
         c, c_latent = [], []
         n = random.randint(1, self.nc)
         for i in range(B):
-            # idx = random.choices(range(self.nc), k=n)
-            # ic = torch.stack([self.queues[type[i]][j].cuda() for j in idx], dim=0)
-            ic = self.queues[type[i]].cuda()
+            if self.use_random_nc:
+                idx = random.choices(range(self.nc), k=n)
+                ic = torch.stack([self.queues[type[i]][j].cuda() for j in idx], dim=0)
+            else:   ic = self.queues[type[i]].cuda()
             ic_latent, ic = ic.split([self.nl * C, C], dim=-1)
             c.append(ic)
             if ic_latent.shape[-1] != 0:

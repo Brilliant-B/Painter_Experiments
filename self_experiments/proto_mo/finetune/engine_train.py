@@ -49,7 +49,7 @@ def train_one_epoch(model: torch.nn.Module,
     for data_iter_step, (type, c_query, c_target, query, target, mask, valid) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         # per iteration lr_scheduler
         if data_iter_step % accum_iter == 0:
-            lr_sched.adjust_learning_rate(optimizer, data_iter_step + 1, len(data_loader), args)
+            lr_sched.adjust_learning_rate(optimizer, epoch * len(data_loader) + data_iter_step + 1, args.epochs * len(data_loader), args)
         
         c_query = c_query.to(device, non_blocking=True)
         c_target = c_target.to(device, non_blocking=True)
