@@ -442,42 +442,48 @@ if __name__ == '__main__':
     INFO = dict()
     INFO['seed'] = args.seed = 0
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
-        "ade20k_image2semantic": 20,
-        "coco_image2panoptic_sem_seg": 25,
-        "nyuv2_image2depth": 15,
+        "ade20k_image2semantic": 28,
+        "coco_image2panoptic_sem_seg": 30,
+        "nyuv2_image2depth": 20,
         "lol_image2enhance": 12,
-        # "derain_image2derain": 1,
-        # "ssid_image2denoise": 1,
+        "derain_image2derain": 10,
+        "ssid_image2denoise": 18,
     }
+    # INFO['datasets_weights'] = args.datasets_weights = datasets = {
+    #     "ade20k_image2semantic": 28,
+    #     "coco_image2panoptic_sem_seg": 30,
+    #     "nyuv2_image2depth": 18,
+    #     "lol_image2enhance": 10,
+    #     "derain_image2derain": 10,
+    #     "ssid_image2denoise": 20,
+    # }
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
         json_path.append(os.path.join(args.data_path, TRAIN_JSON_BANK[dataset_name]))
         val_json_path.append(os.path.join(args.data_path, VAL_JSON_BANK[dataset_name]))
     args.json_path, args.val_json_path = json_path, val_json_path
-
-    INFO['epochs'] = args.epochs = 2
-    INFO['save_freq'] = args.save_itrs = 16000
+    
+    INFO['epochs'] = args.epochs = 3
+    INFO['save_freq'] = args.save_itrs = 32000
     INFO['batch_size'] = args.batch_size = 2
     INFO['accum_iter'] = args.accum_iter = 64
     INFO['learning_rate'] = args.lr = 1e-4
     INFO['warmup_itrs'] = args.warmup_itrs = 2048
-    
+
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
-    INFO['mask_ratio'] = args.mask_ratio = 0.99 # 0.9
+    INFO['mask_ratio'] = args.mask_ratio = 0.99
     
     INFO['skip_query'] = args.skip_query = False
     INFO['use_attn_mean'] = args.use_attn_mean = True
     INFO['use_random_nc'] = args.use_random_nc = False
     INFO['encoder_momentum_weight'] = args.emo = 0.99
-    INFO['context_momentum_weight'] = args.cmo = 0.0 # fully context update
-    INFO['query_momentum_weight'] = args.qmo = 1.0 # no query update
+    INFO['context_momentum_weight'] = args.cmo = 0
+    INFO['query_momentum_weight'] = args.qmo = 1
     
     INFO['num_contexts_input'] = args.nci = 1
     INFO['num_contexts_used'] = args.nc = 5
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    
-    # INFO['pretrained'] = args.finetune = "workbench/train_proto_mo_1/Joint|1:3:15:0:1.0:0.0:0.99|2:0.75/checkpoint-0-24000.pth"
     
     main(args, INFO)

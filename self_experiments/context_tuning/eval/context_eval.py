@@ -28,7 +28,7 @@ from util.ddp_utils import DatasetTest
 from util import ddp_utils
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
 
-import models.proto_mo.proto_mo_2 as painter_variant
+import models.proto_mo.proto_mo_3 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -217,6 +217,7 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     # build model
     model = getattr(painter_variant, arch)(
         seed=args.seed,
+        datasets=args.dataset_names,
         num_contexts_in=args.nci,
         num_contexts=args.nc,
         cq_depth=args.cq,
@@ -229,6 +230,7 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
         use_random_nc=args.use_random_nc,
         is_infer=True,
         use_cache=args.use_cache,
+        is_context_tuning=args.is_context_tuning,
     ).to("cuda")
     assert model.nc % args.batch_size == 0 and model.nc >= args.batch_size, "queue coherence error"
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
@@ -254,7 +256,7 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     interpolate_rel_pos_embed_proto_mo(model_without_ddp, checkpoint)
     
     msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
-    if "vit" in args.ckpt_path:    
+    if "vit" in args.ckpt_path:
         model_without_ddp.init_cm_encoder()
 
     # for k in checkpoint:
@@ -487,7 +489,8 @@ if __name__ == '__main__':
     INFO = dict()
     INFO['seed'] = args.seed = 0
     INFO['use_cache'] = args.use_cache = True
-    dataset_names = [
+    INFO['is_context_tuning'] = args.is_context_tuning = True
+    dataset_names = args.dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
         "nyuv2_image2depth",
@@ -500,7 +503,6 @@ if __name__ == '__main__':
     print("Main Test Started:")
     INFO['num_val'] = args.num_val = 50
     INFO['joint_train'] = args.joint_datasets = True
-    INFO['finetune'] = args.finetune_code = 2
     INFO['train_mask_ratio'] = args.train_mask_ratio = 0.99
     INFO['train_batch_size'] = args.train_batch_size = 128
     
@@ -512,14 +514,14 @@ if __name__ == '__main__':
     INFO['query_momentum_weight'] = args.qmo = 1
     
     INFO['train_num_contexts'] = 5
-    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 5
+    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 3
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:5:15:2:1:0:0.99|2:0.99/checkpoint-1-64000.pth"
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_3/Joint|3:3:15:1:1:0:0.99|ct:0.99/checkpoint-0-32000.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.p}:{args.qmo}:{args.cmo}:{args.emo}|{args.finetune_code}:{args.train_mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.p}:{args.qmo}:{args.cmo}:{args.emo}|ct:{args.train_mask_ratio}")
     if ddp_utils.get_rank() == 0:   os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
         print(json.dumps(INFO, sort_keys=False, indent=4))

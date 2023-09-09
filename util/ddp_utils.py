@@ -12,6 +12,35 @@ imagenet_mean = np.array([0.485, 0.456, 0.406])
 imagenet_std = np.array([0.229, 0.224, 0.225])
 
 
+class DatasetTest_Ori(Dataset):
+    """
+    define dataset for ddp
+    """
+    def __init__(self, img_src_dir, input_size, ext_list=('*.png', '*.jpg'), ):
+        super(DatasetTest, self).__init__()
+        self.img_src_dir = img_src_dir
+        self.input_size = input_size
+
+        img_path_list = []
+        for ext in ext_list:
+            img_path_tmp = glob.glob(os.path.join(img_src_dir, ext))
+            img_path_list.extend(img_path_tmp)
+        self.img_path_list = img_path_list
+
+    def __len__(self):
+        return len(self.img_path_list)
+
+    def __getitem__(self, index):
+        img_path = self.img_path_list[index]
+        img = Image.open(img_path).convert("RGB")
+        size_org = img.size
+        img = img.resize((self.input_size, self.input_size))
+        img = np.array(img) / 255.
+
+        return img, img_path, size_org
+
+
+
 class DatasetTest(Dataset):
     def __init__(self, dataset_root, json_path, input_size, num_val=None):
         super(DatasetTest, self).__init__()
@@ -44,34 +73,37 @@ class DatasetTest(Dataset):
         return img, img_path, tgt, tgt_path, ori_size
 
 
-class DatasetTest_Ori(Dataset):
-    """
-    define dataset for ddp
-    """
-    def __init__(self, img_src_dir, input_size, num_val=None, ext_list=('*.png', '*.jpg'), ):
-        super(DatasetTest_Ori, self).__init__()
-        self.img_src_dir = img_src_dir
-        self.input_size = input_size
+# class DatasetTest_Ori(Dataset):
+#     """
+#     define dataset for ddp
+#     """
+#     def __init__(self, dataset_root, json_path, input_size, num_val=None, ext_list=('*.png', '*.jpg'), ):
+#         super(DatasetTest_Ori, self).__init__()
+#         self.dataset_root = dataset_root
+#         self.json_path = os.path.join(dataset_root, json_path)
+#         self.input_size = input_size
+#         val_pairs = json.load(open(self.json_path))
+#         self.img_paths = list(val_pairs[:num_val])
 
-        img_path_list = []
-        for ext in ext_list:
-            if num_val is not None:
-                img_path_tmp = glob.glob(os.path.join(img_src_dir, ext))[:num_val]
-            else:
-                img_path_tmp = glob.glob(os.path.join(img_src_dir, ext))
-            img_path_list.extend(img_path_tmp)
-        self.img_path_list = img_path_list
+#     def __len__(self):
+#         return len(self.img_paths)
 
-    def __len__(self):
-        return len(self.img_path_list)
-
-    def __getitem__(self, index):
-        img_path = self.img_path_list[index]
-        img = Image.open(img_path).convert("RGB")
-        size_org = img.size
-        img = img.resize((self.input_size, self.input_size))
-        img = np.array(img) / 255.
-        return img, img_path, size_org
+#     def __getitem__(self, index):
+#         img_path = os.path.join(self.dataset_root, self.img_paths[index]["image_path"])
+#         img = Image.open(img_path)
+#         ori_size = list(img.size)
+#         img = img.convert("RGB").resize((self.input_size, self.input_size))
+#         img = torch.from_numpy((np.array(img) / 255. - imagenet_mean) / imagenet_std)
+        
+#         tgt_path = os.path.join(self.dataset_root, self.img_paths[index]["target_path"])
+#         tgt = Image.open(tgt_path)
+#         if "depth" in self.json_path:
+#             tgt = np.array(tgt) * 225 / 10000.
+#             tgt = Image.fromarray(tgt)
+#         tgt = tgt.convert("RGB").resize((self.input_size, self.input_size))
+#         tgt = torch.from_numpy((np.array(tgt) / 255. - imagenet_mean) / imagenet_std)
+        
+#         return img, img_path, size_org
 
 
 def collate_fn(batch):

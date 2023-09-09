@@ -24,11 +24,11 @@ from PIL import Image
 
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
-from util.ddp_utils import DatasetTest
+from util.ddp_utils import DatasetTest, DatasetTest_Ori
 from util import ddp_utils
 from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
 
-import models.proto_mo.proto_mo_2 as painter_variant
+import models.anchor_painter.anchor_painter as painter
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -213,24 +213,9 @@ def get_args_parser():
 
 
 
-def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl1', args=None, prints=True):
+def prepare_model(arch='anchor_painter_patch16_input896x448_win_dec64_8glb_sl1', args=None, prints=True):
     # build model
-    model = getattr(painter_variant, arch)(
-        seed=args.seed,
-        num_contexts_in=args.nci,
-        num_contexts=args.nc,
-        cq_depth=args.cq,
-        p_depth=args.p,
-        encoder_momentum_weight=args.emo,
-        context_momentum_weight=args.cmo,
-        query_momentum_weight=args.qmo,
-        skip_query=args.skip_query,
-        use_attn_mean=args.use_attn_mean,
-        use_random_nc=args.use_random_nc,
-        is_infer=True,
-        use_cache=args.use_cache,
-    ).to("cuda")
-    assert model.nc % args.batch_size == 0 and model.nc >= args.batch_size, "queue coherence error"
+    model = getattr(painter, arch)().to("cuda")
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
     model_without_ddp = model.module
     
@@ -250,15 +235,8 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     
     # load checkpoint and interpolate
     checkpoint = torch.load(args.ckpt_path, map_location='cpu')['model']
-    interpolate_pos_embed(model_without_ddp, checkpoint)
-    interpolate_rel_pos_embed_proto_mo(model_without_ddp, checkpoint)
-    
     msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
-    if "vit" in args.ckpt_path:    
-        model_without_ddp.init_cm_encoder()
 
-    # for k in checkpoint:
-    #     print(k)    
     if prints:
         print(msg)
         print("Model Loaded.")
@@ -270,28 +248,36 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
 def get_contexts(args, dataset_name):
     random.seed(args.seed)
     context_set = DatasetTest(args.dataset_root, TRAIN_JSON_BANK[dataset_name], args.img_size, None)
-    idce = random.choices(range(len(context_set)), k=6)
+    idx = random.choice(range(len(context_set)))
     c_query, c_target = [], []
-    for idx in idce:
-        img, _, tgt, _, _ = context_set[idx]
-        c_query.append(img)
-        c_target.append(tgt)
-    c_query = torch.stack(c_query, dim=0).repeat(args.batch_size, 1, 1, 1, 1)
-    c_target = torch.stack(c_target, dim=0).repeat(args.batch_size, 1, 1, 1, 1)
-    assert c_query.shape == c_target.shape == (args.batch_size, 6, args.img_size, args.img_size, 3)
+    c_query, _, c_target, _, _ = context_set[idx]
+    c_query = c_query.repeat(args.batch_size, 1, 1, 1)
+    c_target = c_target.repeat(args.batch_size, 1, 1, 1)
     return c_query, c_target
 
 
 
-def run_one_batch(type, c_query, c_target, query, model, device):
-    target = torch.zeros_like(query)
-    valid = torch.ones_like(target)
-    mask = torch.ones(model.module.ori_window_size).repeat(valid.shape[0], 1, 1)
-    pred = model(type, c_query.float().to(device), c_target.float().to(device), query.float().to(device), 
-                       target.float().to(device), mask.float().to(device), valid.float().to(device))
-    output = pred.detach().cpu()
+def run_one_batch(img, tgt, model, device):
+    x = torch.tensor(img)
+    x = torch.einsum('nhwc->nchw', x)
+
+    tgt = torch.tensor(tgt)
+    tgt = torch.einsum('nhwc->nchw', tgt)
+
+    patch_size = model.module.patch_size
+    _, _, h, w = tgt.shape
+    num_patches = h * w // patch_size ** 2
+    bool_masked_pos = torch.zeros(num_patches)
+    bool_masked_pos[num_patches//2:] = 1
+    bool_masked_pos = bool_masked_pos.unsqueeze(dim=0)
+
+    valid = torch.ones_like(tgt)
+    _, y, _ = model(x.float().to(device), tgt.float().to(device), bool_masked_pos.to(device), valid.float().to(device))
+    y = model.module.unpatchify(y)
+    y = torch.einsum('nchw->nhwc', y).detach().cpu()
+
+    output = y[:, y.shape[1]//2:, :, :]
     output = output * imagenet_std + imagenet_mean
-    assert output.shape[-1] == 3
     return output
 
 
@@ -327,7 +313,7 @@ def test_one_dataset(args, INFO, verbose=False, warm_up=False):
     
     # Inference Processing
     if args.infer:
-        model_painter, flops = prepare_model(model, args=args, prints=False)
+        model_painter, flops = prepare_model(args=args, prints=False)
         device = torch.device("cuda")
         model_painter.to(device)
         
@@ -337,12 +323,11 @@ def test_one_dataset(args, INFO, verbose=False, warm_up=False):
         num_val = len(dataset_val)
         data_loader_val = DataLoader(dataset_val, batch_size=batch_size, sampler=sampler_val,
                                     drop_last=False, collate_fn=ddp_utils.collate_fn, num_workers=2)
-
-        # load context image-pairs as contextst
-        type = batch_size * [dataset_name]
-        c_query = args.context_base[dataset_name][0][:, :args.nci]
-        c_target = args.context_base[dataset_name][1][:, :args.nci]
-        assert c_query.shape == c_target.shape == (batch_size, args.nci, img_size, img_size, 3)
+        
+        # load context image-pairs as contexts
+        c_query = args.context_base[dataset_name][0]
+        c_target = args.context_base[dataset_name][1]
+        assert c_query.shape == c_target.shape == (batch_size, img_size, img_size, 3)
         
         # start running inference for metrics
         model_painter.eval()
@@ -359,10 +344,12 @@ def test_one_dataset(args, INFO, verbose=False, warm_up=False):
                 query.append(img.unsqueeze(0))
                 sizes.append(size)
             query = torch.cat(query, dim=0)
-            assert query.shape == (batch_size, img_size, img_size, 3)
+            img = torch.cat([c_query, query], dim=1)
+            tgt = torch.cat([c_target, c_target], dim=1)
+            assert img.shape == tgt.shape == (batch_size, 2 * img_size, img_size, 3)
             
             TIME -= time.perf_counter()
-            output = run_one_batch(type, c_query, c_target, query, model_painter, device)
+            output = run_one_batch(img, tgt, model_painter, device)
             TIME += time.perf_counter()
             
             if warm_up: continue
@@ -420,39 +407,6 @@ def test_one_dataset(args, INFO, verbose=False, warm_up=False):
 
 
 
-def graphing(anchor, metrics, output_dir, num_val):
-    # graph the main metrics statistics: miou, time
-    for dataset in metrics.keys():
-        plt.figure(figsize=(30, 20), dpi=100)
-        plt.style.use('fivethirtyeight')
-        adata, data = anchor[dataset], metrics[dataset]
-        x_labels = np.array(list(adata.keys())+list(data.keys()))
-        x_idx = np.arange(len(x_labels))
-        y_idce = np.array(list(adata.values())+list(data.values()))
-        y_min, y_max = np.min(y_idce), np.max(y_idce)
-        # plt.ylim(y_min-0.1*(y_max-y_min), y_max+0.1*(y_max-y_min))
-        n, w = y_idce.shape[0], 0.75
-        for p in range(len(y_idce)):
-            bias_x_idx = x_idx + w*0.5*(2*p-n+1)/n
-            plt.bar(bias_x_idx, y_idce[p], bottom=0, label="baseline" if not p else "finetuned", width=w/n)
-        
-        plt.legend(loc='best', prop={'size': 30})
-        plt.rcParams.update({'font.size': 30})
-        plt.xticks(x_idx, labels=x_labels, fontsize=27)
-        # plt.yticks(np.linspace(y_min-0.1*(y_max-y_min), y_max+0.1*(y_max-y_min), 20), fontsize=22)
-        plt.yticks(np.linspace(0, y_max+0.1*(y_max-y_min), 20), fontsize=22)
-        plt.grid(True, linestyle='--', alpha=0.5)
-        plt.xlabel("cr_depth ; xcr_depth", fontdict={'size': 30})
-        plt.ylabel(dataset, fontdict={'size': 30})
-        plt.title(f"{dataset.upper()} for [2 context 16:18] val {num_val}", fontdict={'size': 40})
-        plt.tight_layout()
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
-        plt.savefig(os.path.join(output_dir, f"metrics_{dataset}.jpg"))
-        plt.clf()
-
-
-
 imagenet_mean = np.array([0.485, 0.456, 0.406])
 imagenet_std = np.array([0.229, 0.224, 0.225])
 
@@ -486,40 +440,18 @@ if __name__ == '__main__':
     
     INFO = dict()
     INFO['seed'] = args.seed = 0
-    INFO['use_cache'] = args.use_cache = True
+    INFO['num_val'] = args.num_val = 50
     dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
         "nyuv2_image2depth",
         "lol_image2enhance",
-        # "derain_image2derain",
-        # "ssid_image2denoise",
+        "derain_image2derain",
+        "ssid_image2denoise",
     ]
     args.context_base = {dataset_name: list(get_contexts(args, dataset_name)) for dataset_name in dataset_names}
-    
-    print("Main Test Started:")
-    INFO['num_val'] = args.num_val = 50
-    INFO['joint_train'] = args.joint_datasets = True
-    INFO['finetune'] = args.finetune_code = 2
-    INFO['train_mask_ratio'] = args.train_mask_ratio = 0.99
-    INFO['train_batch_size'] = args.train_batch_size = 128
-    
-    INFO['skip_query'] = args.skip_query = True
-    INFO['use_attn_mean'] = args.use_attn_mean = True
-    INFO['use_random_nc'] = args.use_random_nc = False
-    INFO['encoder_momentum_weight'] = args.emo = 0.99
-    INFO['context_momentum_weight'] = args.cmo = 0
-    INFO['query_momentum_weight'] = args.qmo = 1
-    
-    INFO['train_num_contexts'] = 5
-    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 5
-    INFO['cr_depth'] = args.cq = 15
-    INFO['p_depth'] = args.p = 1
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:5:15:2:1:0:0.99|2:0.99/checkpoint-1-64000.pth"
-    
-    mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.p}:{args.qmo}:{args.cmo}:{args.emo}|{args.finetune_code}:{args.train_mask_ratio}")
+        f"original_settings")
     if ddp_utils.get_rank() == 0:   os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
         print(json.dumps(INFO, sort_keys=False, indent=4))
@@ -532,7 +464,7 @@ if __name__ == '__main__':
         for key in results.keys():
             metrics[dataset_name][key] = results[key]
     
-    print("Main Results:")
+    print("Anchor Results:")
     print(json.dumps(metrics, sort_keys=False, indent=4), "\n\n")
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
         print("Main Results:", file=f)
