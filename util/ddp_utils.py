@@ -73,38 +73,6 @@ class DatasetTest(Dataset):
         return img, img_path, tgt, tgt_path, ori_size
 
 
-# class DatasetTest_Ori(Dataset):
-#     """
-#     define dataset for ddp
-#     """
-#     def __init__(self, dataset_root, json_path, input_size, num_val=None, ext_list=('*.png', '*.jpg'), ):
-#         super(DatasetTest_Ori, self).__init__()
-#         self.dataset_root = dataset_root
-#         self.json_path = os.path.join(dataset_root, json_path)
-#         self.input_size = input_size
-#         val_pairs = json.load(open(self.json_path))
-#         self.img_paths = list(val_pairs[:num_val])
-
-#     def __len__(self):
-#         return len(self.img_paths)
-
-#     def __getitem__(self, index):
-#         img_path = os.path.join(self.dataset_root, self.img_paths[index]["image_path"])
-#         img = Image.open(img_path)
-#         ori_size = list(img.size)
-#         img = img.convert("RGB").resize((self.input_size, self.input_size))
-#         img = torch.from_numpy((np.array(img) / 255. - imagenet_mean) / imagenet_std)
-        
-#         tgt_path = os.path.join(self.dataset_root, self.img_paths[index]["target_path"])
-#         tgt = Image.open(tgt_path)
-#         if "depth" in self.json_path:
-#             tgt = np.array(tgt) * 225 / 10000.
-#             tgt = Image.fromarray(tgt)
-#         tgt = tgt.convert("RGB").resize((self.input_size, self.input_size))
-#         tgt = torch.from_numpy((np.array(tgt) / 255. - imagenet_mean) / imagenet_std)
-        
-#         return img, img_path, size_org
-
 
 def collate_fn(batch):
     return batch

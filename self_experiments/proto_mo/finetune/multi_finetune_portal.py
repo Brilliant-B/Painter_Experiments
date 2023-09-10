@@ -443,20 +443,12 @@ if __name__ == '__main__':
     INFO['seed'] = args.seed = 0
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
         "ade20k_image2semantic": 28,
-        "coco_image2panoptic_sem_seg": 30,
-        "nyuv2_image2depth": 20,
-        "lol_image2enhance": 12,
+        "coco_image2panoptic_sem_seg": 33,
+        "nyuv2_image2depth": 28,
+        "lol_image2enhance": 15,
         "derain_image2derain": 10,
-        "ssid_image2denoise": 18,
+        "ssid_image2denoise": 20,
     }
-    # INFO['datasets_weights'] = args.datasets_weights = datasets = {
-    #     "ade20k_image2semantic": 28,
-    #     "coco_image2panoptic_sem_seg": 30,
-    #     "nyuv2_image2depth": 18,
-    #     "lol_image2enhance": 10,
-    #     "derain_image2derain": 10,
-    #     "ssid_image2denoise": 20,
-    # }
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
         json_path.append(os.path.join(args.data_path, TRAIN_JSON_BANK[dataset_name]))
@@ -482,7 +474,7 @@ if __name__ == '__main__':
     INFO['query_momentum_weight'] = args.qmo = 1
     
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['num_contexts_used'] = args.nc = 5
+    INFO['num_contexts_used'] = args.nc = 3
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
     

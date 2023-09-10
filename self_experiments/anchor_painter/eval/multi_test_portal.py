@@ -258,10 +258,9 @@ def get_contexts(args, dataset_name):
 
 
 def run_one_batch(img, tgt, model, device):
-    x = torch.tensor(img)
+    x = img.clone().detach().requires_grad_(True)
     x = torch.einsum('nhwc->nchw', x)
-
-    tgt = torch.tensor(tgt)
+    tgt = tgt.clone().detach().requires_grad_(True)
     tgt = torch.einsum('nhwc->nchw', tgt)
 
     patch_size = model.module.patch_size
@@ -439,15 +438,15 @@ if __name__ == '__main__':
     args = ddp_utils.init_distributed_mode(args)
     
     INFO = dict()
-    INFO['seed'] = args.seed = 0
+    INFO['seed'] = args.seed = 1
     INFO['num_val'] = args.num_val = 50
     dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
         "nyuv2_image2depth",
         "lol_image2enhance",
-        "derain_image2derain",
-        "ssid_image2denoise",
+        # "derain_image2derain",
+        # "ssid_image2denoise",
     ]
     args.context_base = {dataset_name: list(get_contexts(args, dataset_name)) for dataset_name in dataset_names}
     args.output_dir = os.path.join(args.output_dir, \

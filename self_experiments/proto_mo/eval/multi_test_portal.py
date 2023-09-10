@@ -485,8 +485,8 @@ if __name__ == '__main__':
     args = ddp_utils.init_distributed_mode(args)
     
     INFO = dict()
-    INFO['seed'] = args.seed = 0
-    INFO['use_cache'] = args.use_cache = True
+    INFO['seed'] = args.seed = 1
+    INFO['num_val'] = args.num_val = 50
     dataset_names = [
         "ade20k_image2semantic",
         "coco_image2panoptic_sem_seg",
@@ -498,7 +498,7 @@ if __name__ == '__main__':
     args.context_base = {dataset_name: list(get_contexts(args, dataset_name)) for dataset_name in dataset_names}
     
     print("Main Test Started:")
-    INFO['num_val'] = args.num_val = 50
+    INFO['use_cache'] = args.use_cache = True
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 2
     INFO['train_mask_ratio'] = args.train_mask_ratio = 0.99
@@ -511,11 +511,11 @@ if __name__ == '__main__':
     INFO['context_momentum_weight'] = args.cmo = 0
     INFO['query_momentum_weight'] = args.qmo = 1
     
-    INFO['train_num_contexts'] = 5
-    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 5
+    INFO['train_num_contexts'] = 3
+    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 3
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:5:15:2:1:0:0.99|2:0.99/checkpoint-1-64000.pth"
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:3:15:1:1:0:0.99|2:0.99/checkpoint-0-109772.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \
