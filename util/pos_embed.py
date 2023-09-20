@@ -113,6 +113,15 @@ def interpolate_rel_pos_embed(model, checkpoint):
             param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)
 
 
+def interpolate_rel_pos_embed_ep(model, checkpoint):
+    # print(checkpoint.keys())
+    for i in range(model.depth):
+        n = model.nc if i in model.e_layers else 0
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(n * 56 + 55), mode='linear')[0].permute(1, 0)
+
+
 def interpolate_rel_pos_embed_proto_mo(model, checkpoint):
     # print(checkpoint.keys())
     for i in range(model.cq):
@@ -120,6 +129,27 @@ def interpolate_rel_pos_embed_proto_mo(model, checkpoint):
         checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
             param, size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
     for i in range(model.cq, 24):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)
+    if "p_blocks.0.attn.rel_pos_h" in checkpoint.keys():
+        for i in range(model.p):
+            param = checkpoint[f'p_blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+            checkpoint[f'p_blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+                param, size=(model.nc * 56 + 55), mode='linear')[0].permute(1, 0)
+
+
+def interpolate_rel_pos_embed_proto_mo_replace(model, checkpoint):
+    # print(checkpoint.keys())
+    for i in range(model.cq):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
+    for i in range(model.cq, model.cq + model.p):
+        param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
+        checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
+            param, size=(model.nc * 56 + 55), mode='linear')[0].permute(1, 0)
+    for i in range(model.cq + model.p, 24):
         param = checkpoint[f'blocks.{i}.attn.rel_pos_h'].permute(1, 0).unsqueeze(0)
         checkpoint[f'blocks.{i}.attn.rel_pos_h'] = F.interpolate(
             param, size=(1 * 56 + 55), mode='linear')[0].permute(1, 0)

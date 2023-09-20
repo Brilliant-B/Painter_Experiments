@@ -25,7 +25,10 @@ import util.lr_decay as lrd
 import util.misc as misc
 from util.misc import get_parameter_groups
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
-from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
+from util.pos_embed import (
+    interpolate_pos_embed,
+    interpolate_rel_pos_embed_ep,
+)
 from data.pairdataset_variant import PairDataset
 from util.ddp_utils import DatasetTest
 from torch.utils.data import DataLoader
@@ -34,8 +37,8 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.proto_mo.proto_mo_2_with_ct as painter_variant
-from self_experiments.context_tuning.finetune.engine_train import train_one_epoch
+import models.EP.EP_1 as painter_variant
+from self_experiments.EP.finetune.engine_train import train_one_epoch
 
 TRAIN_JSON_BANK = {
     "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
@@ -168,37 +171,30 @@ def get_args_parser():
 
 
 
-def freeze_match(name, f_list):
+def key_match(name, f_list):
     ret = False
     for n in f_list:
-        ret = ret or (re.search(n, name) is not None)
+        ret = ret or (n in name)
     return ret
 
 def prepare_model(args, prints=False):
     # get model with args
     model = painter_variant.__dict__[args.model](
         seed=args.seed,
-        datasets=args.datasets_weights.keys(),
-        num_contexts_in=args.nci,
-        num_contexts=args.nc,
-        cq_depth=args.cq,
-        p_depth=args.p,
-        encoder_momentum_weight=args.emo,
-        context_momentum_weight=args.cmo,
-        query_momentum_weight=args.qmo,
-        skip_query=args.skip_query,
-        use_attn_mean=args.use_attn_mean,
-        use_random_nc=args.use_random_nc,
-        dataset_loss_weight=args.datasets_weights,
+        datasets_lw=args.datasets_weights,
+        n_contexts=args.nc,
+        ni_contexts=args.nci,
+        extractor_layers=args.e_layers,
+        momentum=args.momentum,
+        use_cpooling=args.use_cpooling,
         is_infer=False,
-        is_context_tuning=True,
     ).to("cuda")
     
     if args.finetune:
         checkpoint = torch.load(args.finetune, map_location='cpu')['model']    
         # interpolate position embedding
         interpolate_pos_embed(model, checkpoint)
-        interpolate_rel_pos_embed_proto_mo(model, checkpoint)
+        interpolate_rel_pos_embed_ep(model, checkpoint)
         # interpolate patch embedding
         if "patch32" in args.model:
             patch_weight = checkpoint['patch_embed.proj.weight']
@@ -210,6 +206,14 @@ def prepare_model(args, prints=False):
         if args.last_norm_instance:
             rm_key_list.extend(['norm.weight', 'norm.bias'])
         
+        finetune_code, freeze_list = args.finetune_code, []
+        if finetune_code < 3:
+            freeze_list.append("decoder.")
+            code2layers = [0, model.cq, model.depth]
+            for l in range(model.depth):
+                if l >= code2layers[finetune_code]:
+                    freeze_list.append(f"blocks.{l}.")
+        # print(freeze_list)
         for k in rm_key_list:
             if k in checkpoint and checkpoint[k].shape != state_dict[k].shape:
                 if prints:  print(f"Removing key {k} from pretrained checkpoint")
@@ -217,16 +221,13 @@ def prepare_model(args, prints=False):
         
         # load pre-trained model
         msg = model.load_state_dict(checkpoint, strict=False)
-        if "vit" in args.finetune or args.emo > 0.0: 
-            model.init_cm_encoder()
+        if "vit" in args.finetune: model.init_cq_duplicate()
         if prints:  print(msg)
         
-        # freeze all modules except context features
+        # freeze part of the modules
         for (name, param) in model.named_parameters():
-            if "lc_query" not in name and "lc_target" not in name:
-                param.requires_grad = False
+            if key_match(name, freeze_list): param.requires_grad = False
             if prints:  print(name, param.requires_grad)
-    
     return model
 
 
@@ -293,23 +294,6 @@ def init_model_queue(args, model):
 
 
 
-def init_model_lc(args, model):
-    device = torch.device("cuda")
-    for type in args.datasets_weights.keys():
-        dataset = DatasetTest(args.data_path, TRAIN_JSON_BANK[dataset_name], args.img_size[0], args.nc)
-        data_loader = DataLoader(dataset, batch_size=1, drop_last=False, collate_fn=ddp_utils.collate_fn, num_workers=2)
-        c_query, c_target = [], []
-        for data in tqdm.tqdm(data_loader):
-            img, _, tgt, _, _ = data[0]
-            c_query.append(img)
-            c_target.append(tgt)
-        c_query = torch.stack(c_query, dim=0).unsqueeze(0)
-        c_target = torch.stack(c_target, dim=0).unsqueeze(0)
-        model.lc_query[type] = c_query.float().to(device, non_blocking=True)
-        model.lc_target[type] = c_target.float().to(device, non_blocking=True)
-
-
-
 def main(args, INFO):
     device = torch.device(args.device)
     seed = args.seed + misc.get_rank()
@@ -318,7 +302,7 @@ def main(args, INFO):
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     output_dir = args.output_dir = os.path.join(args.base_output_dir, \
-        f"{mix_data}|{args.nci}:{args.nc}:{args.cq}:{args.p}:{args.qmo}:{args.cmo}:{args.emo}|ct:{args.mask_ratio}")
+        f"{mix_data}|{args.nci}:{args.nc}:{args.use_cpooling}|{args.finetune_code}:{args.mask_ratio}")
     train_log_dir = os.path.join(output_dir, "train_log.log")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     print('output_dir: {}'.format(output_dir))
@@ -349,7 +333,7 @@ def main(args, INFO):
         assert model.gradient_accumulation_steps() == args.accum_iter
     else:
         if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True) # 
             model_without_ddp = model.module
         # following timm: set wd as 0 for bias and norm layers
         param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
@@ -403,8 +387,8 @@ def main(args, INFO):
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
     
     # initialize the model queue:
-    print("[Initialize Model LC]")
-    # init_model_lc(args, model_without_ddp)
+    print("[Initialize Model Queue]")
+    init_model_queue(args, model_without_ddp)
     
     # show important hyper-parameters
     print("[Important Hyper-Parameters]")
@@ -455,39 +439,35 @@ if __name__ == '__main__':
     INFO = dict()
     INFO['seed'] = args.seed = 0
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
-        "ade20k_image2semantic": 25,
-        "coco_image2panoptic_sem_seg": 28,
-        "nyuv2_image2depth": 18,
-        "lol_image2enhance": 15,
-        "derain_image2derain": 15,
-        "ssid_image2denoise": 15,
+        "ade20k_image2semantic": 10,
+        "coco_image2panoptic_sem_seg": 11,
+        "nyuv2_image2depth": 9,
+        "lol_image2enhance": 5,
+        "derain_image2derain": 5,
+        "ssid_image2denoise": 8,
     }
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
         json_path.append(os.path.join(args.data_path, TRAIN_JSON_BANK[dataset_name]))
         val_json_path.append(os.path.join(args.data_path, VAL_JSON_BANK[dataset_name]))
     args.json_path, args.val_json_path = json_path, val_json_path
-
-    INFO['epochs'] = args.epochs = 2
-    INFO['save_freq'] = args.save_itrs = 16000
+    
+    INFO['epochs'] = args.epochs = 3
+    INFO['save_freq'] = args.save_itrs = 32000
     INFO['batch_size'] = args.batch_size = 2
     INFO['accum_iter'] = args.accum_iter = 64
     INFO['learning_rate'] = args.lr = 1e-4
     INFO['warmup_itrs'] = args.warmup_itrs = 2048
-    
+
     INFO['joint_train'] = args.joint_datasets = True
+    INFO['finetune'] = args.finetune_code = 3
     INFO['mask_ratio'] = args.mask_ratio = 0.99
     
-    INFO['skip_query'] = args.skip_query = False
-    INFO['use_attn_mean'] = args.use_attn_mean = True
-    INFO['use_random_nc'] = args.use_random_nc = False
-    INFO['encoder_momentum_weight'] = args.emo = 0.99
-    INFO['context_momentum_weight'] = args.cmo = 0
-    INFO['query_momentum_weight'] = args.qmo = 1
-    
-    INFO['num_contexts_input'] = args.nci = INFO['num_contexts_used'] = args.nc = 3
-    INFO['cr_depth'] = args.cq = 15
-    INFO['p_depth'] = args.p = 1
-    INFO['pretrained'] = args.finetune = "workbench/train_proto_mo_2/Joint|1:5:15:1:1:0:0.99|2:0.99/checkpoint-1-109772.pth"
+    args.e_layers = [0, 2, 4, 5] + [15, 16, 17, 18, 19, 20, 21, 22, 23]
+    INFO['extractor_layers'] = str(args.e_layers)
+    INFO['num_contexts_used'] = args.nc = 1
+    INFO['num_contexts_input'] = args.nci = 1
+    INFO['use_cpooling'] = args.use_cpooling = True
+    INFO['momentum'] = args.momentum = 0.99
     
     main(args, INFO)

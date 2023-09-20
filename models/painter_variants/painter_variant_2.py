@@ -393,7 +393,7 @@ class Painter_Varient(nn.Module):
             if idx == self.fcq - 1:
                 p, y = x.split((self.num_prompts, 1), dim=2)
                 x = torch.cat([torch.mean(p, dim=2, keepdim=True), y], dim=2)
-            # print("post:", x.shape)
+                
             if idx in self.encoder_sampling:
                 feat = torch.reshape(x, (B, ori_shape[1], -1, Hp, Wp, C)).mean(1) # (B, -1, Hp, Wp, C)
                 if self.use_cr_bank and len(self.latent_bank) and idx in self.latent_bank.keys() and idx < self.cr_depth - 1:

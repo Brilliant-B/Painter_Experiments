@@ -2,9 +2,9 @@
 
 NUM_GPUS=1
 DATA_PATH=datasets
-name=proto_mo_3
+name=EP_1
 python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12358 \
-	--use_env self_experiments/proto_mo/finetune/multi_finetune_portal.py \
+	--use_env self_experiments/EP/finetune/multi_finetune_portal.py \
     --batch_size 2 \
     --accum_iter 32 \
     --model_name $name \

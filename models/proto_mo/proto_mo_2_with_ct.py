@@ -278,8 +278,6 @@ class Painter_Varient(nn.Module):
             num_contexts=3,
             cq_depth=15,
             p_depth=2,
-            insert_pc=True,
-            use_kn_cait=False,
             encoder_momentum_weight=0.0,
             context_momentum_weight=0.2,
             query_momentum_weight=1.0,
@@ -289,6 +287,7 @@ class Painter_Varient(nn.Module):
             dataset_loss_weight=None,
             is_infer=False,
             use_cache=True,
+            is_context_tuning=False,
             
             mlp_ratio=4.,
             qkv_bias=True,
@@ -313,6 +312,7 @@ class Painter_Varient(nn.Module):
         self.seed = seed
         self.is_infer = is_infer
         self.use_cache = use_cache
+        self.is_context_tuning = is_context_tuning
         self.skip_query = skip_query
         self.use_attn_mean = use_attn_mean
         self.use_random_nc = use_random_nc
@@ -370,6 +370,15 @@ class Painter_Varient(nn.Module):
         else:
             self.queues = {name: F.normalize(torch.randn(self.nc, *self.ori_window_size, (self.nl + 1) * embed_dim), dim=-1) for name in datasets}
             self.ptrs = {name: torch.zeros(1, dtype=int) for name in datasets}
+        if self.is_context_tuning:
+            self.lc_query = nn.ParameterDict({
+                name: nn.Parameter(torch.randn(1, self.nci, *self.img_size, 3))
+                for name in datasets
+            })
+            self.lc_target = nn.ParameterDict({
+                name: nn.Parameter(torch.randn(1, self.nci, *self.img_size, 3))
+                for name in datasets
+            })
         
         # stochastic depth decay rule
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]
@@ -586,6 +595,12 @@ class Painter_Varient(nn.Module):
         assert x.shape == (B, Hp, Wp, C) # x_latent.shape == (B, Hp, Wp, self.nl * C)
         
         if (not self.is_infer and self.cmo < 1.0) or (self.is_infer and (not self.use_cache or self.cache is None)):
+            if self.is_context_tuning:
+                c_query, c_target = [], []
+                for i in range(B):
+                    c_query.append(self.lc_query[type[i]])
+                    c_target.append(self.lc_target[type[i]])
+                c_query, c_target = torch.cat(c_query, dim=0), torch.cat(c_target, dim=0)
             c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
             c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
             co = self.patch_embed(co.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
@@ -595,11 +610,15 @@ class Painter_Varient(nn.Module):
                 c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
             c, c_latent = self.cm_encoder(c) if self.emo > 0.0 else self.cq_encoder(c)
             assert c.shape == (B, self.nci, Hp, Wp, C) and len(type) == B # c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) 
-            if not self.is_infer:   self.queue_cmo_update(type, c, c_latent)
-            elif not self.skip_query:   self.cache_storage(c, c_latent)
+            if not self.is_context_tuning:
+                if not self.is_infer:   self.queue_cmo_update(type, c, c_latent)
+                elif not self.skip_query:   self.cache_storage(c, c_latent)
         if not self.is_infer:
-            if self.qmo < 1.0:  self.queue_qmo_update(type, x, x_latent)
-            c, c_latent = self.context_queue_sampling(type, B, C)
+            if self.is_context_tuning:
+                c_latent = c_latent.mean(1)
+            else:
+                if self.qmo < 1.0:  self.queue_qmo_update(type, x, x_latent)
+                c, c_latent = self.context_queue_sampling(type, B, C)
         elif not self.skip_query and self.use_cache and self.cache is not None:
             c, c_latent = self.cache_sampling(C)
         
@@ -687,7 +706,7 @@ class Painter_Varient(nn.Module):
             return loss, pred, image_mask
 
 
-def proto_mo_2_patch16_win_dec64_8glb_sl1(**kwargs):
+def proto_mo_2_ct_patch16_win_dec64_8glb_sl1(**kwargs):
     model = Painter_Varient(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

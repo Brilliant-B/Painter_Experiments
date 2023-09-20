@@ -25,7 +25,11 @@ import util.lr_decay as lrd
 import util.misc as misc
 from util.misc import get_parameter_groups
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
-from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
+from util.pos_embed import (
+    interpolate_pos_embed,
+    interpolate_rel_pos_embed_proto_mo,
+    interpolate_rel_pos_embed_proto_mo_replace,
+)
 from data.pairdataset_variant import PairDataset
 from util.ddp_utils import DatasetTest
 from torch.utils.data import DataLoader
@@ -34,7 +38,7 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.proto_mo.proto_mo_2 as painter_variant
+import models.proto_mo.proto_mo_3 as painter_variant
 from self_experiments.proto_mo.finetune.engine_train import train_one_epoch
 
 TRAIN_JSON_BANK = {
@@ -168,10 +172,10 @@ def get_args_parser():
 
 
 
-def freeze_match(name, f_list):
+def key_match(name, f_list):
     ret = False
     for n in f_list:
-        ret = ret or (re.search(n, name) is not None)
+        ret = ret or (n in name)
     return ret
 
 def prepare_model(args, prints=False):
@@ -183,6 +187,8 @@ def prepare_model(args, prints=False):
         num_contexts=args.nc,
         cq_depth=args.cq,
         p_depth=args.p,
+        insert_pc=args.insert_pc,
+        use_kn_cait=args.use_kn_cait,
         encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
@@ -197,7 +203,8 @@ def prepare_model(args, prints=False):
         checkpoint = torch.load(args.finetune, map_location='cpu')['model']    
         # interpolate position embedding
         interpolate_pos_embed(model, checkpoint)
-        interpolate_rel_pos_embed_proto_mo(model, checkpoint)
+        if args.insert_pc:  interpolate_rel_pos_embed_proto_mo(model, checkpoint)
+        else:   interpolate_rel_pos_embed_proto_mo_replace(model, checkpoint)
         # interpolate patch embedding
         if "patch32" in args.model:
             patch_weight = checkpoint['patch_embed.proj.weight']
@@ -208,14 +215,22 @@ def prepare_model(args, prints=False):
         rm_key_list = ['decoder_embed.weight', 'decoder_embed.bias',  'mask_token']
         if args.last_norm_instance:
             rm_key_list.extend(['norm.weight', 'norm.bias'])
+            
+        if False:
+            not_load = [f'blocks.{i}.' for i in range(args.cq)]
+            for name in list(checkpoint.keys()):
+                if key_match(name, not_load):
+                    del checkpoint[name]
+            # for name in checkpoint:
+            #     print(name)
         
         finetune_code, freeze_list = args.finetune_code, []
         if finetune_code < 3:
-            freeze_list.append("decoder*")
+            freeze_list.append("decoder.")
             code2layers = [0, model.cq, model.depth]
             for l in range(model.depth):
                 if l >= code2layers[finetune_code]:
-                    freeze_list.append(f"blocks.{l}.*")
+                    freeze_list.append(f"blocks.{l}.")
         # print(freeze_list)
         for k in rm_key_list:
             if k in checkpoint and checkpoint[k].shape != state_dict[k].shape:
@@ -229,7 +244,7 @@ def prepare_model(args, prints=False):
         
         # freeze part of the modules
         for (name, param) in model.named_parameters():
-            if freeze_match(name, freeze_list): param.requires_grad = False
+            if key_match(name, freeze_list): param.requires_grad = False
             if prints:  print(name, param.requires_grad)
     return model
 
@@ -336,7 +351,7 @@ def main(args, INFO):
         assert model.gradient_accumulation_steps() == args.accum_iter
     else:
         if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu]) # find_unused_parameters=True
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True) # 
             model_without_ddp = model.module
         # following timm: set wd as 0 for bias and norm layers
         param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
@@ -442,12 +457,12 @@ if __name__ == '__main__':
     INFO = dict()
     INFO['seed'] = args.seed = 0
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
-        "ade20k_image2semantic": 28,
-        "coco_image2panoptic_sem_seg": 33,
-        "nyuv2_image2depth": 28,
-        "lol_image2enhance": 15,
-        "derain_image2derain": 10,
-        "ssid_image2denoise": 20,
+        "ade20k_image2semantic": 10,
+        "coco_image2panoptic_sem_seg": 11,
+        "nyuv2_image2depth": 9,
+        "lol_image2enhance": 5,
+        "derain_image2derain": 5,
+        "ssid_image2denoise": 8,
     }
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
@@ -463,19 +478,21 @@ if __name__ == '__main__':
     INFO['warmup_itrs'] = args.warmup_itrs = 2048
 
     INFO['joint_train'] = args.joint_datasets = True
-    INFO['finetune'] = args.finetune_code = 2
+    INFO['finetune'] = args.finetune_code = 3
     INFO['mask_ratio'] = args.mask_ratio = 0.99
     
     INFO['skip_query'] = args.skip_query = False
     INFO['use_attn_mean'] = args.use_attn_mean = True
     INFO['use_random_nc'] = args.use_random_nc = False
+    INFO['use_kn_cait'] = args.use_kn_cait = True
     INFO['encoder_momentum_weight'] = args.emo = 0.99
     INFO['context_momentum_weight'] = args.cmo = 0
     INFO['query_momentum_weight'] = args.qmo = 1
     
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['num_contexts_used'] = args.nc = 3
+    INFO['num_contexts_used'] = args.nc = 5
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
+    INFO['insert_pc'] = args.insert_pc = False
     
     main(args, INFO)

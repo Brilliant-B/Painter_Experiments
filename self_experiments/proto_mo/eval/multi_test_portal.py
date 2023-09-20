@@ -26,9 +26,13 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from util.ddp_utils import DatasetTest
 from util import ddp_utils
-from util.pos_embed import interpolate_pos_embed, interpolate_rel_pos_embed_proto_mo
+from util.pos_embed import (
+    interpolate_pos_embed,
+    interpolate_rel_pos_embed_proto_mo,
+    interpolate_rel_pos_embed_proto_mo_replace,
+)
 
-import models.proto_mo.proto_mo_2 as painter_variant
+import models.proto_mo.proto_mo_3 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -221,6 +225,8 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
         num_contexts=args.nc,
         cq_depth=args.cq,
         p_depth=args.p,
+        insert_pc=args.insert_pc,
+        use_kn_cait=args.use_kn_cait,
         encoder_momentum_weight=args.emo,
         context_momentum_weight=args.cmo,
         query_momentum_weight=args.qmo,
@@ -251,10 +257,11 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     # load checkpoint and interpolate
     checkpoint = torch.load(args.ckpt_path, map_location='cpu')['model']
     interpolate_pos_embed(model_without_ddp, checkpoint)
-    interpolate_rel_pos_embed_proto_mo(model_without_ddp, checkpoint)
+    if args.insert_pc:  interpolate_rel_pos_embed_proto_mo(model_without_ddp, checkpoint)
+    else:   interpolate_rel_pos_embed_proto_mo_replace(model_without_ddp, checkpoint)
     
     msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
-    if "vit" in args.ckpt_path:    
+    if "vit" in args.ckpt_path:
         model_without_ddp.init_cm_encoder()
 
     # for k in checkpoint:
@@ -485,7 +492,7 @@ if __name__ == '__main__':
     args = ddp_utils.init_distributed_mode(args)
     
     INFO = dict()
-    INFO['seed'] = args.seed = 1
+    INFO['seed'] = args.seed = 0
     INFO['num_val'] = args.num_val = 50
     dataset_names = [
         "ade20k_image2semantic",
@@ -500,22 +507,24 @@ if __name__ == '__main__':
     print("Main Test Started:")
     INFO['use_cache'] = args.use_cache = True
     INFO['joint_train'] = args.joint_datasets = True
-    INFO['finetune'] = args.finetune_code = 2
+    INFO['finetune'] = args.finetune_code = 3
     INFO['train_mask_ratio'] = args.train_mask_ratio = 0.99
     INFO['train_batch_size'] = args.train_batch_size = 128
     
     INFO['skip_query'] = args.skip_query = True
     INFO['use_attn_mean'] = args.use_attn_mean = True
     INFO['use_random_nc'] = args.use_random_nc = False
+    INFO['use_kn_cait'] = args.use_kn_cait = False
     INFO['encoder_momentum_weight'] = args.emo = 0.99
     INFO['context_momentum_weight'] = args.cmo = 0
     INFO['query_momentum_weight'] = args.qmo = 1
     
-    INFO['train_num_contexts'] = 3
-    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 3
+    INFO['train_num_contexts'] = 5
+    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 1
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_2/Joint|1:3:15:1:1:0:0.99|2:0.99/checkpoint-0-109772.pth"
+    INFO['insert_pc'] = args.insert_pc = False
+    # INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_3/Joint|1:5:15:1:1:0:0.99|3:0.99/checkpoint-0-64000.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
-import random
 
 import fvcore.nn.weight_init as weight_init
 from detectron2.layers import CNNBlockBase, Conv2d, get_norm
@@ -102,20 +101,24 @@ class Attention(nn.Module):
                 trunc_normal_(self.rel_pos_h, std=0.02)
                 trunc_normal_(self.rel_pos_w, std=0.02)
 
-    def forward(self, x):
+    def forward(self, x, cait=False):
         B, H, W, _ = x.shape
+        Ht = W if cait else H
         # qkv with shape (3, nHead, B, H * W, C)
         qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1).permute(2, 3, 0, 1, 4)
         # q, k, v with shape (nHead * B, H * W, C)
         q, k, v = qkv.reshape(3, self.num_heads * B, H * W, -1).unbind(0)
+        if cait:    q = q[:, -W*W:]
         attn = (q * self.scale) @ k.transpose(-2, -1)
         if self.use_rel_pos:
-            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (H, W), (H, W))
+            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (Ht, W), (H, W))
         attn = attn.softmax(dim=-1)
-        # print(attn.shape)
-        x = (attn @ v).view(self.num_heads, B, H, W, -1).permute(1, 2, 3, 0, 4).reshape(B, H, W, -1)
+        x = attn @ v
+        x = x.view(self.num_heads, B, Ht, W, -1)
+        x = x.permute(1, 2, 3, 0, 4).reshape(B, Ht, W, -1)
         x = self.proj(x)
         return x
+
 
 
 class ResBottleneckBlock(CNNBlockBase):
@@ -177,6 +180,7 @@ class ResBottleneckBlock(CNNBlockBase):
         return out
 
 
+
 class Block(nn.Module):
     """Transformer blocks with support of window attention and residual propagation blocks"""
     def __init__(
@@ -193,7 +197,6 @@ class Block(nn.Module):
         window_size=0,
         use_residual_block=False,
         input_size=None,
-        use_cait=False,
     ):
         """
         Args:
@@ -237,13 +240,8 @@ class Block(nn.Module):
                 norm="LN",
                 act_layer=act_layer,
             )
-        self.use_cait = use_cait
-
-    def forward(self, x):
-        ori_shape = x.shape
-        x = x.reshape(-1, *ori_shape[-3:])
-        shortcut = x
-        x = self.norm1(x)
+    
+    def attn_window(self, x):
         # Window partition
         if self.window_size > 0:
             x, pad_hw = window_partition(x, self.window_size)
@@ -251,17 +249,26 @@ class Block(nn.Module):
         # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, self.input_size)
+        return x
+
+    def forward(self, x, use_cait=False):
+        ori_shape = list(x.shape)
+        x = x.reshape(-1, *ori_shape[-3:])
+        shortcut = x[:, -ori_shape[-2]:] if use_cait else x
+        x = self.norm1(x)
+        if use_cait:    x = self.attn(x, cait=True)
+        else:   x = self.attn_window(x)
         x = shortcut + self.drop_path(x)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         if self.use_residual_block:
             x = self.residual(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+        if use_cait:    ori_shape[-3] = ori_shape[-2]
         x = x.reshape(ori_shape)
         return x
 
 
-class Painter_Varient(nn.Module):
-    """ Masked Autoencoder with VisionTransformer backbone
-    """
+
+class Extractor_Processor(nn.Module):
     def __init__(
             self,
             img_size=(448, 448),
@@ -273,20 +280,11 @@ class Painter_Varient(nn.Module):
             merge_layer=3,
             
             seed=0,
-            datasets=None,
-            num_contexts_in=1,
-            num_contexts=3,
-            cq_depth=15,
-            p_depth=2,
-            insert_pc=True,
-            use_kn_cait=False,
-            encoder_momentum_weight=0.0,
-            context_momentum_weight=0.2,
-            query_momentum_weight=1.0,
-            skip_query=False,
-            use_attn_mean=True,
-            use_random_nc=False,
-            dataset_loss_weight=None,
+            datasets_lw=None,
+            n_contexts=3,
+            ni_contexts=1,
+            extractor_layers=None,
+            use_cpooling=True,
             is_infer=False,
             use_cache=True,
             
@@ -304,6 +302,7 @@ class Painter_Varient(nn.Module):
             use_act_checkpoint=False,
             pretrain_img_size=224,
             pretrain_use_cls_token=True,
+            out_feature="last_feat",
             decoder_embed_dim=128,
             loss_func="smoothl1",
         ):
@@ -312,16 +311,11 @@ class Painter_Varient(nn.Module):
         # --------------------------------------------------------------------------
         self.seed = seed
         self.is_infer = is_infer
-        self.use_cache = use_cache
-        self.skip_query = skip_query
-        self.use_attn_mean = use_attn_mean
-        self.use_random_nc = use_random_nc
         self.img_size = img_size
         self.ori_window_size = (img_size[0] // patch_size, img_size[1] // patch_size)
         self.pretrain_use_cls_token = pretrain_use_cls_token
         self.patch_size = patch_size
         self.depth = depth
-        self.embed_dim = embed_dim
         self.patch_embed = PatchEmbed(
             kernel_size=(patch_size, patch_size),
             stride=(patch_size, patch_size),
@@ -331,25 +325,33 @@ class Painter_Varient(nn.Module):
         self.patch_embed.num_patches = (img_size[0] // patch_size) * (img_size[1] // patch_size)
         self.loss_func = loss_func
         self.merge_layer= merge_layer
-        self.encoder_sampling = set([6, 12, 18, 24])
-        if not self.is_infer:
-            self.dloss_weight = dataset_loss_weight
-            self.need_loss_cal = min(self.dloss_weight.values()) < max(self.dloss_weight.values())
+        self.encoder_sampling = set([5, 11, 17, 23])
+        self.nc = n_contexts
+        self.nci = ni_contexts
+        self.e_layers = extractor_layers
+        self.use_cpooling = use_cpooling
+        assert merge_layer <= min(self.encoder_sampling)
         
-        self.nc = num_contexts
-        self.nci = num_contexts_in
-        if self.is_infer:   assert self.nci == self.nc
-        else:   assert self.nci <= self.nc and self.nc % self.nci == 0
-        self.cq = cq_depth
-        self.p = p_depth
-        assert self.cq <= self.depth
+        if is_infer:
+            assert self.nc == self.nci
+            self.use_cache = use_cache
+            self.cache_init = False
+            self.cache = {i: None for i in self.e_layers}
+            self.l_cache = {i: None for i in self.encoder_sampling}
+        else:
+            self.queues = {name: {i: F.normalize(torch.randn(self.nc, *self.ori_window_size, embed_dim), dim=-1) if i >= merge_layer 
+                                  else F.normalize(torch.randn(self.nc, 2, *self.ori_window_size, embed_dim), dim=-1)
+                                  for i in self.e_layers} for name in datasets_lw.keys()}
+            self.l_queues = {name: {i: F.normalize(torch.randn(self.nc, *self.ori_window_size, embed_dim), dim=-1) 
+                                    for i in self.encoder_sampling} for name in datasets_lw.keys()}
+            self.ptrs = {name: torch.zeros(1, dtype=int) for name in datasets_lw.keys()}
+            self.datasets_lw = datasets_lw
+            self.need_loss_cal = min(datasets_lw.values()) < max(datasets_lw.values())
         
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_x = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_y = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
-        if not self.use_attn_mean:
-            self.prototype_tokens = nn.Parameter(torch.zeros(1, *self.ori_window_size, self.embed_dim))
-
+        
         if use_abs_pos:
             # Initialize absolute positional embedding with pretrain image size.
             num_patches = (pretrain_img_size // patch_size) * (pretrain_img_size // patch_size)
@@ -357,49 +359,16 @@ class Painter_Varient(nn.Module):
             self.pos_embed = nn.Parameter(torch.zeros(1, num_positions, embed_dim), requires_grad=True)
         else:
             self.pos_embed = None
-
-        self.emo = encoder_momentum_weight
-        self.cmo = context_momentum_weight
-        self.qmo = query_momentum_weight
-        assert 0 <= self.emo <= 1 and 0 <= self.cmo <= 1 and 0 <= self.qmo <= 1
-        
-        self.nl = sum([x <= self.cq for x in self.encoder_sampling])
-        
-        if self.is_infer:
-            self.cache = None
-        else:
-            self.queues = {name: F.normalize(torch.randn(self.nc, *self.ori_window_size, (self.nl + 1) * embed_dim), dim=-1) for name in datasets}
-            self.ptrs = {name: torch.zeros(1, dtype=int) for name in datasets}
         
         # stochastic depth decay rule
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]
-
+        
+        self.c_blocks = nn.ModuleList()
         self.blocks = nn.ModuleList()
-        if self.emo > 0.0:  self.cm_blocks = nn.ModuleList()
         for i in range(self.depth):
-            if i < self.cq:
-                input_size = self.ori_window_size
-                if self.emo > 0.0:
-                    cm_block = Block(
-                        dim=embed_dim,
-                        num_heads=num_heads,
-                        mlp_ratio=mlp_ratio,
-                        qkv_bias=qkv_bias,
-                        drop_path=dpr[i],
-                        norm_layer=norm_layer,
-                        act_layer=act_layer,
-                        use_rel_pos=use_rel_pos,
-                        rel_pos_zero_init=rel_pos_zero_init,
-                        window_size=window_size if i in window_block_indexes else 0,
-                        use_residual_block=i in residual_block_indexes,
-                        input_size=input_size,
-                    )
-                    if use_act_checkpoint:
-                        cm_block = checkpoint_wrapper(cm_block)
-                    self.cm_blocks.append(cm_block)
-            else:
-                input_size = (2 * self.ori_window_size[0], self.ori_window_size[1])
-            block = Block(
+            input_size = ((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1])
+            windowsize = 0 if i in extractor_layers or i not in window_block_indexes else window_size
+            c_block = Block(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
@@ -409,29 +378,33 @@ class Painter_Varient(nn.Module):
                 act_layer=act_layer,
                 use_rel_pos=use_rel_pos,
                 rel_pos_zero_init=rel_pos_zero_init,
-                window_size=window_size if i in window_block_indexes else 0,
+                window_size=windowsize,
                 use_residual_block=i in residual_block_indexes,
-                input_size=input_size,
+                input_size=self.ori_window_size,
             )
-            if use_act_checkpoint:
-                block = checkpoint_wrapper(block)
-            self.blocks.append(block)
-            
-        self.p_blocks = nn.ModuleList()
-        for i in range(self.p):
-            input_size = ((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1])
-            block = CA_Block(
+            q_block = Block(
                 dim=embed_dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
-                drop_path=0.,
+                drop_path=dpr[i],
                 norm_layer=norm_layer,
                 act_layer=act_layer,
+                use_rel_pos=use_rel_pos,
+                rel_pos_zero_init=rel_pos_zero_init,
+                window_size=windowsize,
+                use_residual_block=i in residual_block_indexes,
+                input_size=input_size if i in extractor_layers else self.ori_window_size,
             )
             if use_act_checkpoint:
-                block = checkpoint_wrapper(block)
-            self.p_blocks.append(block)
+                c_block = checkpoint_wrapper(c_block)
+                q_block = checkpoint_wrapper(q_block)
+            self.c_blocks.append(c_block)
+            self.blocks.append(q_block)
+
+        self._out_feature_channels = {out_feature: embed_dim}
+        self._out_feature_strides = {out_feature: patch_size}
+        self._out_features = [out_feature]
 
         if self.pos_embed is not None:
             trunc_normal_(self.pos_embed, std=0.02)
@@ -445,17 +418,10 @@ class Painter_Varient(nn.Module):
             nn.GELU(),
             nn.Conv2d(self.decoder_embed_dim, 3, kernel_size=1, bias=True),
         )
-        '''
-        self._out_feature_channels = {out_feature: embed_dim}
-        self._out_feature_strides = {out_feature: patch_size}
-        self._out_features = [out_feature]
-        '''
         # --------------------------------------------------------------------------
         torch.nn.init.normal_(self.mask_token, std=.02)
         torch.nn.init.normal_(self.segment_token_x, std=.02)
         torch.nn.init.normal_(self.segment_token_y, std=.02)
-        if not self.use_attn_mean:
-            torch.nn.init.normal_(self.prototype_tokens, std=.1)
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -472,161 +438,157 @@ class Painter_Varient(nn.Module):
         return {'pos_embed', 'cls_token'}
     
     @torch.no_grad()
-    def init_cm_encoder(self):
-        for param_cm, param_q in zip(self.cm_blocks.parameters(), self.blocks[:self.cq].parameters()):
-            param_cm.data.copy_(param_q.data)  # initialize
-            param_cm.requires_grad = False
+    def init_cq_duplicate(self):
+        for (name_cm, param_cm), param_q in zip(self.c_blocks.named_parameters(), self.blocks.parameters()):
+            tmp_q = param_q.data
+            if "attn.rel_pos_h" in name_cm:
+                tmp_q = F.interpolate(tmp_q.permute(1, 0).unsqueeze(0), size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
+            param_cm.data.copy_(tmp_q)
     
     @torch.no_grad()
-    def momentum_update_cm_encoder(self):
-        # print("momentum update")
-        for param_cm, param_q in zip(self.cm_blocks.parameters(), self.blocks[:self.cq].parameters()):
-            param_cm.data = param_cm.data * self.emo + param_q.data * (1. - self.emo)
-    
-    def cm_encoder(self, c):
-        c_latent = []
-        for idx in range(self.cq):
-            c = self.cm_blocks[idx](c)
-            if idx + 1 == self.merge_layer:
-                c = c.mean(-4) # [B, nci, Hp, Wp, C]
-            if idx + 1 in self.encoder_sampling:
-                c_latent.append(self.norm(c))
-        c_latent = None if len(c_latent) == 0 else torch.cat(c_latent, dim=-1)
-        return c, c_latent
-    
-    def cq_encoder(self, x):
-        x_latent = []
-        for idx in range(self.cq):
-            x = self.blocks[idx](x)
-            if idx + 1 == self.merge_layer:
-                x = x.mean(-4)
-            if idx + 1 in self.encoder_sampling:
-                x_latent.append(self.norm(x))
-        x_latent = None if len(x_latent) == 0 else torch.cat(x_latent, dim=-1)
-        return x, x_latent
-    
-    def proto_cait(self, cls, pch):
-        for idx in range(self.p):
-            cls = self.p_blocks[idx](cls, pch)
-        return cls
-    
-    def kn_encoder(self, x):
-        latent = []
-        for idx in range(self.cq, 24):
-            x = self.blocks[idx](x)
-            if idx + 1 in self.encoder_sampling:
-                latent.append(self.norm(x))
-        return latent
+    def queue_sample_update(self, type, idx, c):
+        c_all = []
+        for i in range(len(type)):
+            ic = self.queues[type[i]][idx]
+            c_all.append(ic.cuda())
+        c_all = torch.stack(c_all, dim=0)
+        c_all = c_all.transpose(1, 2)
+        if idx >= self.merge_layer:
+            for i in range(len(type)):
+                ptr = self.ptrs[type[i]]
+                self.queues[type[i]][idx][ptr:ptr + self.nci] = c[i]
+                self.ptrs[type[i]] = (ptr + self.nci) % self.nc
+        else:
+            for i in range(len(type)):
+                ptr = self.ptrs[type[i]]
+                self.queues[type[i]][idx][ptr:ptr + self.nci] = c[i].transpose(0, 1)
+                self.ptrs[type[i]] = (ptr + self.nci) % self.nc
+        return c_all  # [B, nc, Hp, Wp, C] / [B, 2, nc, Hp, Wp, C]
     
     @torch.no_grad()
-    def cache_storage(self, c, c_latent):
-        if c_latent is not None:
-            if self.skip_query: c_latent = c_latent.mean(1)
-            c = torch.cat([c_latent, c], dim=-1)
-        self.cache = c.cpu()
-    
-    @torch.no_grad()
-    def cache_sampling(self, C):
-        cache = self.cache.cuda()
-        c_latent, c = cache.split([self.nl * C, C], dim=-1)
-        c_latent = None if c_latent.shape[-1] == 0 else c_latent if self.skip_query else c_latent.mean(1)
-        return c, c_latent  # [B, nc*Hp, Wp, C] [B, Hp, Wp, nl*C]
-    
-    @torch.no_grad() # cmo_former
-    def queue_cmo_update(self, type, c, c_latent):
-        # [B, nci, Hp, Wp, (nl+1)*C]
-        if c_latent is not None:
-            c = torch.cat([c_latent, c], dim=-1).cpu()
+    def lqueue_sample_update(self, type, idx, c):
+        cl_all = []
+        for i in range(len(type)):
+            cl = self.l_queues[type[i]][idx]
+            cl_all.append(cl.cuda())
+        cl_all = torch.stack(cl_all, dim=0)
+        cl_all = cl_all.mean(-4)
         for i in range(len(type)):
             ptr = self.ptrs[type[i]]
-            self.queues[type[i]][ptr:ptr + self.nci] = \
-                self.cmo * self.queues[type[i]][ptr:ptr + self.nci] + (1 - self.cmo) * c[i]
-            self.ptrs[type[i]] = (ptr + self.nci) % self.nc
-            
-    @torch.no_grad() # qmo_latter
-    def queue_qmo_update(self, type, q, q_latent):
-        # [B, Hp, Wp, (nl+1)*C]
-        if q_latent is not None:
-            q = torch.cat([q_latent, q], dim=-1).cpu()
-        for i in range(len(type)):
-            ptr = self.ptrs[type[i]]
-            self.queues[type[i]][ptr:ptr + self.nci] = \
-                self.qmo * self.queues[type[i]][ptr:ptr + self.nci] + (1 - self.qmo) * q[i].unsqueeze(0)
-    
-    @torch.no_grad()
-    def context_queue_sampling(self, type, B, C):
-        c, c_latent = [], []
-        n = random.randint(1, self.nc)
-        for i in range(B):
-            if self.use_random_nc:
-                idx = random.choices(range(self.nc), k=n)
-                ic = torch.stack([self.queues[type[i]][j].cuda() for j in idx], dim=0)
-            else:   ic = self.queues[type[i]].cuda()
-            ic_latent, ic = ic.split([self.nl * C, C], dim=-1)
-            c.append(ic)
-            if ic_latent.shape[-1] != 0:
-                c_latent.append(ic_latent.mean(0))
-        c = torch.stack(c, dim=0)
-        c_latent = None if len(c_latent) == 0 else torch.stack(c_latent, dim=0)
-        return c, c_latent  # [B, nc, Hp, Wp, C] [B, Hp, Wp, nl*C]
-    
-    
+            self.l_queues[type[i]][idx][ptr:ptr + self.nci] = c[i]
+            self.ptrs[type[i]] = (ptr + self.nci) % self.nc     
+        return cl_all  # [B, Hp, Wp, C]
+
     def forward_encoder(self, type, c_query, c_target, query, target, mask):
         x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
         t = self.patch_embed(target.permute(0, 3, 1, 2).contiguous()) + self.segment_token_y
         B, Hp, Wp, C = x.shape
-        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp) and self.mask_token.shape[-1] == C, "encoder input shape error"
+        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp) and self.mask_token.shape[-1] == C
         mask_token = self.mask_token.expand(B, Hp, Wp, -1)
         mask = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
         t = t * (1 - mask) + mask_token * mask # (B, Hp, Hp, C)
         x = torch.stack([x, t], dim=1) # (B, 2, Hp, Wp, C)
         if self.pos_embed is not None:
             x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-        x, x_latent = self.cq_encoder(x)
-        assert x.shape == (B, Hp, Wp, C) # x_latent.shape == (B, Hp, Wp, self.nl * C)
         
-        if (not self.is_infer and self.cmo < 1.0) or (self.is_infer and (not self.use_cache or self.cache is None)):
+        c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
+        c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
+        co = self.patch_embed(co.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
+        c, co = c.reshape(B, -1, Hp, Wp, C), co.reshape(B, -1, Hp, Wp, C)
+        c = torch.stack([c, co], dim=1) # (B, 2, nci, Hp, Wp, C)
+        if self.pos_embed is not None:
+            c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
+        
+        latents = []
+        for idx in range(self.depth):
+            if idx in self.e_layers:
+                c_all = self.queue_sample_update(type, idx, c)
+                if self.use_cpooling:   cc = torch.mean(c_all, -4)
+                else:   cc = torch.flatten(c_all, -4, -3)
+                x = torch.cat([cc, x], dim=-3)
+                x = self.blocks[idx](x, use_cait=True)
+            else:   x = self.blocks[idx](x)
+            c = self.c_blocks[idx](c)
+            if idx + 1 == self.merge_layer:
+                x = x.mean(1)
+                c = c.mean(1)
+            if idx in self.encoder_sampling:
+                c_latent = self.lqueue_sample_update(type, idx, c)
+                latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
+                latents.append(latent)
+        
+        latents = torch.cat(latents, dim=-1)
+        assert latents.shape == (B, 2 * Hp, Wp, 4 * C)
+        return latents
+    
+    @torch.no_grad()
+    def cache_sample(self, B, idx):
+        c_all = self.cache[idx].cuda()
+        c_all = torch.stack([c_all for _ in range(B)], dim=0)    
+        return c_all  # [B, nc, Hp, Wp, C] / [B, 2, nc, Hp, Wp, C]
+    
+    @torch.no_grad()
+    def cache_update(self, idx, c):
+        self.cache[idx] = c[0]
+    
+    @torch.no_grad()
+    def lcache_sample(self, B, idx):
+        l_all = self.l_cache[idx].cuda()
+        l_all = l_all.repeat(B, 1, 1, 1)
+        return l_all # [B, Hp, Wp, C]
+    
+    @torch.no_grad()
+    def lcache_update(self, idx, c):
+        self.l_cache[idx] = c[0]
+    
+    def forward_encoder_infer(self, c_query, c_target, query, target, mask):
+        x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
+        t = self.patch_embed(target.permute(0, 3, 1, 2).contiguous()) + self.segment_token_y
+        B, Hp, Wp, C = x.shape
+        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp) and self.mask_token.shape[-1] == C
+        mask_token = self.mask_token.expand(B, Hp, Wp, -1)
+        mask = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
+        t = t * (1 - mask) + mask_token * mask # (B, Hp, Hp, C)
+        x = torch.stack([x, t], dim=1) # (B, 2, Hp, Wp, C)
+        if self.pos_embed is not None:
+            x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
+        
+        need_c = not self.use_cache or not self.cache_init
+        if need_c:
             c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
             c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
             co = self.patch_embed(co.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
             c, co = c.reshape(B, -1, Hp, Wp, C), co.reshape(B, -1, Hp, Wp, C)
-            c = torch.stack([c, co], dim=2) # (B, nci, 2, Hp, Wp, C)
+            c = torch.stack([c, co], dim=1) # (B, 2, nci, Hp, Wp, C)
             if self.pos_embed is not None:
                 c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-            c, c_latent = self.cm_encoder(c) if self.emo > 0.0 else self.cq_encoder(c)
-            assert c.shape == (B, self.nci, Hp, Wp, C) and len(type) == B # c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) 
-            if not self.is_infer:   self.queue_cmo_update(type, c, c_latent)
-            elif not self.skip_query:   self.cache_storage(c, c_latent)
-        if not self.is_infer:
-            if self.qmo < 1.0:  self.queue_qmo_update(type, x, x_latent)
-            c, c_latent = self.context_queue_sampling(type, B, C)
-        elif not self.skip_query and self.use_cache and self.cache is not None:
-            c, c_latent = self.cache_sampling(C)
+
+        latents = []
+        for idx in range(self.depth):
+            if idx in self.e_layers:
+                if need_c:  self.cache_update(idx, c)
+                else:   c = self.cache_sample(B, idx)
+                if self.use_cpooling:   cc = torch.mean(c, -4)
+                else:   cc = torch.flatten(c, -4, -3)
+                x = torch.cat([cc, x], dim=-3)
+                x = self.blocks[idx](x, use_cait=True)
+            else:   x = self.blocks[idx](x)
+            if need_c:  c = self.c_blocks[idx](c)
+            if idx + 1 == self.merge_layer:
+                x = x.mean(1)
+                if need_c:  c = c.mean(1)
+            if idx in self.encoder_sampling:
+                if need_c:
+                    c_latent = torch.mean(c, -4)
+                    self.lcache_update(idx, c_latent)
+                else:   c_latent = self.lcache_sample(B, idx)
+                latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
+                latents.append(latent)
         
-        if self.skip_query:
-            if not self.is_infer or not self.use_cache or self.cache is None:
-                if self.use_attn_mean:  p = torch.mean(c, dim=1)
-                else:   p = self.prototype_tokens.repeat(B, 1, 1, 1)
-                c = c.flatten(1, 2)
-                p = self.proto_cait(p, c)
-                if self.is_infer and self.use_cache:   self.cache_storage(p, c_latent)
-            if self.is_infer and self.use_cache:    p, c_latent = self.cache_sampling(C)
-        else:
-            if self.use_attn_mean:  p = torch.mean(c, dim=1)
-            else:   p = self.prototype_tokens.repeat(B, 1, 1, 1)
-            c = c.flatten(1, 2).repeat(2, 1, 1, 1) # add query interaction
-            x = torch.cat([p, x], dim=0)
-            p, x = self.proto_cait(x, c).split([B, B], dim=0)
-        
-        x = torch.cat([p, x], dim=1)
-        assert x.shape == (B, 2 * Hp, Wp, C)
-        latent = self.kn_encoder(x)
-        if x_latent is not None:
-            if self.is_infer and not self.use_cache:    c_latent = c_latent.mean(1)
-            x_latent = torch.cat([c_latent, x_latent], dim=1) # [B, 2*Hp, Wp, nl*C]
-            latent = torch.cat([x_latent] + latent, dim=-1)
-        assert latent.shape == (B, 2 * Hp, Wp, 4 * C)
-        return latent
+        latents = torch.cat(latents, dim=-1)
+        assert latents.shape == (B, 2 * Hp, Wp, 4 * C)
+        if self.use_cache and not self.cache_init:  self.cache_init = True
+        return latents
 
     def forward_decoder(self, latent):
         x = self.decoder_embed(latent) # predictor projection
@@ -668,7 +630,7 @@ class Painter_Varient(nn.Module):
         
         if self.need_loss_cal:
             for i in range(b):
-                image_mask[i] = image_mask[i] * self.dloss_weight[type[i]]
+                image_mask[i] = image_mask[i] * self.datasets_lw[type[i]]
         
         Loss = (loss * image_mask).sum() / (image_mask.sum() + 1e-2)  # mean loss on removed patches
         return Loss, image_mask
@@ -678,23 +640,25 @@ class Painter_Varient(nn.Module):
         # print(query.shape, target.shape) # (B, H, W, 3)
         # print(mask.shape) # (B, Hp, Wp)
         # print(valid.shape) # (B, H, W, 3)
-        latent = self.forward_encoder(type, c_query, c_target, query, target, mask)
-        pred = self.forward_decoder(latent)
         if self.is_infer:
+            latent = self.forward_encoder_infer(c_query, c_target, query, target, mask)
+            pred = self.forward_decoder(latent)
             return pred
         else:
+            latent = self.forward_encoder(type, c_query, c_target, query, target, mask)
+            pred = self.forward_decoder(latent)
             loss, image_mask = self.forward_loss(type, pred, target, mask, valid)
             return loss, pred, image_mask
 
 
-def proto_mo_2_patch16_win_dec64_8glb_sl1(**kwargs):
-    model = Painter_Varient(
+def EP_0_patch16_win_dec64_8glb_sl1(**kwargs):
+    model = Extractor_Processor(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,
         mlp_ratio=4, norm_layer=partial(nn.LayerNorm, eps=1e-6),
         window_block_indexes=(list(range(0, 2)) + list(range(3, 5)) + list(range(6, 8)) + list(range(9, 11)) + \
                                 list(range(12, 14)), list(range(15, 17)), list(range(18, 20)), list(range(21, 23))),
-        residual_block_indexes=[], use_rel_pos=True,
+        residual_block_indexes=[], use_rel_pos=True, out_feature="last_feat",
         decoder_embed_dim=64,
         loss_func="smoothl1",
         **kwargs)
