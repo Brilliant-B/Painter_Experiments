@@ -38,7 +38,7 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.proto_mo.proto_mo_3 as painter_variant
+import models.proto_mo.proto_mo_5 as painter_variant
 from self_experiments.proto_mo.finetune.engine_train import train_one_epoch
 
 TRAIN_JSON_BANK = {
@@ -411,7 +411,7 @@ def main(args, INFO):
     # show important hyper-parameters
     print("[Important Hyper-Parameters]")
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    if args.lr is None:  # only base_lr is specified
+    if args.lr is None:  # base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
     print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
     print("actual lr: %.2e" % args.lr)
@@ -474,7 +474,7 @@ if __name__ == '__main__':
     INFO['save_freq'] = args.save_itrs = 32000
     INFO['batch_size'] = args.batch_size = 2
     INFO['accum_iter'] = args.accum_iter = 64
-    INFO['learning_rate'] = args.lr = 1e-4
+    INFO['learning_rate'] = args.lr = 7.5e-4 # 1e-4
     INFO['warmup_itrs'] = args.warmup_itrs = 2048
 
     INFO['joint_train'] = args.joint_datasets = True
@@ -484,7 +484,7 @@ if __name__ == '__main__':
     INFO['skip_query'] = args.skip_query = False
     INFO['use_attn_mean'] = args.use_attn_mean = True
     INFO['use_random_nc'] = args.use_random_nc = False
-    INFO['use_kn_cait'] = args.use_kn_cait = True
+    INFO['use_kn_cait'] = args.use_kn_cait = False
     INFO['encoder_momentum_weight'] = args.emo = 0.99
     INFO['context_momentum_weight'] = args.cmo = 0
     INFO['query_momentum_weight'] = args.qmo = 1
@@ -493,6 +493,6 @@ if __name__ == '__main__':
     INFO['num_contexts_used'] = args.nc = 5
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    INFO['insert_pc'] = args.insert_pc = False
+    INFO['insert_pc'] = args.insert_pc = True
     
     main(args, INFO)

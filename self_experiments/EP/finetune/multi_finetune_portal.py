@@ -27,7 +27,7 @@ from util.misc import get_parameter_groups
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.pos_embed import (
     interpolate_pos_embed,
-    interpolate_rel_pos_embed_ep,
+    interpolate_rel_pos_embed_ep_pc,
 )
 from data.pairdataset_variant import PairDataset
 from util.ddp_utils import DatasetTest
@@ -37,7 +37,7 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.EP.EP_1 as painter_variant
+import models.EP.EP_2 as painter_variant
 from self_experiments.EP.finetune.engine_train import train_one_epoch
 
 TRAIN_JSON_BANK = {
@@ -184,7 +184,11 @@ def prepare_model(args, prints=False):
         datasets_lw=args.datasets_weights,
         n_contexts=args.nc,
         ni_contexts=args.nci,
-        extractor_layers=args.e_layers,
+        e_layer=args.e_layer,
+        g_layer=args.g_layer,
+        use_pc=args.use_pc,
+        insert_pc=args.insert_pc,
+        pc_skip=args.pc_skip,
         momentum=args.momentum,
         use_cpooling=args.use_cpooling,
         is_infer=False,
@@ -194,7 +198,7 @@ def prepare_model(args, prints=False):
         checkpoint = torch.load(args.finetune, map_location='cpu')['model']    
         # interpolate position embedding
         interpolate_pos_embed(model, checkpoint)
-        interpolate_rel_pos_embed_ep(model, checkpoint)
+        interpolate_rel_pos_embed_ep_pc(model, checkpoint)
         # interpolate patch embedding
         if "patch32" in args.model:
             patch_weight = checkpoint['patch_embed.proj.weight']
@@ -463,11 +467,15 @@ if __name__ == '__main__':
     INFO['finetune'] = args.finetune_code = 3
     INFO['mask_ratio'] = args.mask_ratio = 0.99
     
-    args.e_layers = [0, 2, 4, 5] + [15, 16, 17, 18, 19, 20, 21, 22, 23]
-    INFO['extractor_layers'] = str(args.e_layers)
-    INFO['num_contexts_used'] = args.nc = 1
+    INFO['num_contexts_used'] = args.nc = 5
     INFO['num_contexts_input'] = args.nci = 1
+    INFO['extract_layer'] = args.e_layer = 3
+    INFO['global_layer'] = args.g_layer = 18
+    INFO['use_pc'] = args.use_pc = True
+    INFO['insert_pc'] = args.insert_pc = True
+    INFO['pc_skip'] = args.pc_skip = True
     INFO['use_cpooling'] = args.use_cpooling = True
     INFO['momentum'] = args.momentum = 0.99
     
     main(args, INFO)
+    

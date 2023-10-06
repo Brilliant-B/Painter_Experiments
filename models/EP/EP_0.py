@@ -284,6 +284,7 @@ class Extractor_Processor(nn.Module):
             n_contexts=3,
             ni_contexts=1,
             extractor_layers=None,
+            momentum=0.9,
             use_cpooling=True,
             is_infer=False,
             use_cache=True,

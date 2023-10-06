@@ -32,7 +32,7 @@ from util.pos_embed import (
     interpolate_rel_pos_embed_proto_mo_replace,
 )
 
-import models.proto_mo.proto_mo_3 as painter_variant
+import models.proto_mo.proto_mo_2 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -520,10 +520,10 @@ if __name__ == '__main__':
     INFO['query_momentum_weight'] = args.qmo = 1
     
     INFO['train_num_contexts'] = 5
-    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 1
+    INFO['num_contexts'] = args.nc = args.nci = 5
     INFO['cr_depth'] = args.cq = 15
     INFO['p_depth'] = args.p = 1
-    INFO['insert_pc'] = args.insert_pc = False
+    INFO['insert_pc'] = args.insert_pc = True
     # INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_3/Joint|1:5:15:1:1:0:0.99|3:0.99/checkpoint-0-64000.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"

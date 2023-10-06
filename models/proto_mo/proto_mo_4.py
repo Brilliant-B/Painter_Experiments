@@ -378,6 +378,9 @@ class Painter_Varient(nn.Module):
         if self.is_infer:
             self.cache = None
         else:
+            self.e_queues = {name: {i: F.normalize(torch.randn(self.nc, *self.ori_window_size, embed_dim), dim=-1) if i >= merge_layer 
+                                  else F.normalize(torch.randn(self.nc, 2, *self.ori_window_size, embed_dim), dim=-1)
+                                  for i in range(3)} for name in datasets}
             self.queues = {name: F.normalize(torch.randn(self.nc, *self.ori_window_size, (self.nl + 1) * embed_dim), dim=-1) for name in datasets}
             self.ptrs = {name: torch.zeros(1, dtype=int) for name in datasets}
         
@@ -511,12 +514,16 @@ class Painter_Varient(nn.Module):
                 c = c.mean(-4) # [B, nci, Hp, Wp, C]
             if idx + 1 in self.encoder_sampling:
                 c_latent.append(self.norm(c))
+            if idx < 3:
+                c_all = self.queue_sample_update(type, idx, c)
         c_latent = None if len(c_latent) == 0 else torch.cat(c_latent, dim=-1)
-        return c, c_latent
+        return c, c_latent, c_all
     
-    def cq_encoder(self, x):
+    def cq_encoder(self, x, extract):
         x_latent = []
         for idx in range(self.cq):
+            if idx < 3:
+                x = torch.cat([extract, x], dim=-3)
             x = self.blocks[idx](x)
             if idx + 1 == self.merge_layer:
                 x = x.mean(-4)
@@ -601,20 +608,28 @@ class Painter_Varient(nn.Module):
         return c, c_latent  # [B, nc, Hp, Wp, C] [B, Hp, Wp, nl*C]
     
     
+    @torch.no_grad()
+    def queue_sample_update(self, type, idx, c):
+        c_all = []
+        for i in range(len(type)):
+            ic = self.e_queues[type[i]][idx]
+            c_all.append(ic.cuda())
+        c_all = torch.stack(c_all, dim=0)
+        if idx >= self.merge_layer:
+            for i in range(len(type)):
+                ptr = self.ptrs[type[i]]
+                self.e_queues[type[i]][idx][ptr:ptr + self.nci] = c[i]
+                self.ptrs[type[i]] = (ptr + self.nci) % self.nc
+        else:
+            c_all = c_all.transpose(1, 2)
+            for i in range(len(type)):
+                ptr = self.ptrs[type[i]]
+                self.e_queues[type[i]][idx][ptr:ptr + self.nci] = c[i].transpose(0, 1)
+                self.ptrs[type[i]] = (ptr + self.nci) % self.nc
+        return c_all  # [B, nc, Hp, Wp, C] / [B, 2, nc, Hp, Wp, C]
+    
+    
     def forward_encoder(self, type, c_query, c_target, query, target, mask):
-        x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
-        t = self.patch_embed(target.permute(0, 3, 1, 2).contiguous()) + self.segment_token_y
-        B, Hp, Wp, C = x.shape
-        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp) and self.mask_token.shape[-1] == C, "encoder input shape error"
-        mask_token = self.mask_token.expand(B, Hp, Wp, -1)
-        mask = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
-        t = t * (1 - mask) + mask_token * mask # (B, Hp, Hp, C)
-        x = torch.stack([x, t], dim=1) # (B, 2, Hp, Wp, C)
-        if self.pos_embed is not None:
-            x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-        x, x_latent = self.cq_encoder(x)
-        assert x.shape == (B, Hp, Wp, C) # x_latent.shape == (B, Hp, Wp, self.nl * C)
-        
         if (not self.is_infer and self.cmo < 1.0) or (self.is_infer and (not self.use_cache or self.cache is None)):
             c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
             c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
@@ -623,10 +638,25 @@ class Painter_Varient(nn.Module):
             c = torch.stack([c, co], dim=2) # (B, nci, 2, Hp, Wp, C)
             if self.pos_embed is not None:
                 c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-            c, c_latent = self.cm_encoder(c) if self.emo > 0.0 else self.cq_encoder(c)
+            c, c_latent, extract = self.cm_encoder(c) if self.emo > 0.0 else self.cq_encoder(c)
             assert c.shape == (B, self.nci, Hp, Wp, C) and len(type) == B # c_latent.shape == (B, self.nci, Hp, Wp, self.nl * C) 
             if not self.is_infer:   self.queue_cmo_update(type, c, c_latent)
             elif not self.skip_query:   self.cache_storage(c, c_latent)
+        
+        x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
+        t = self.patch_embed(target.permute(0, 3, 1, 2).contiguous()) + self.segment_token_y
+        B, Hp, Wp, C  = x.shape
+        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp) and self.mask_token.shape[-1] == C, "encoder input shape error"
+        mask_token = self.mask_token.expand(B, Hp, Wp, -1)
+        mask = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
+        t = t * (1 - mask) + mask_token * mask # (B, Hp, Hp, C)
+        x = torch.stack([x, t], dim=1) # (B, 2, Hp, Wp, C)
+        if self.pos_embed is not None:
+            x = x + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
+        x, x_latent = self.cq_encoder(x, extract)
+        assert x.shape == (B, Hp, Wp, C) # x_latent.shape == (B, Hp, Wp, self.nl * C)
+        
+        
         if not self.is_infer:
             if self.qmo < 1.0:  self.queue_qmo_update(type, x, x_latent)
             c, c_latent = self.context_queue_sampling(type, B, C)

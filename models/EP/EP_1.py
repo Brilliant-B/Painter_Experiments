@@ -284,6 +284,7 @@ class Extractor_Processor(nn.Module):
             n_contexts=3,
             ni_contexts=1,
             extractor_layers=None,
+            global_layers=None,
             momentum=0.9,
             use_cpooling=True,
             is_infer=False,
@@ -330,6 +331,8 @@ class Extractor_Processor(nn.Module):
         self.nc = n_contexts
         self.nci = ni_contexts
         self.e_layers = extractor_layers
+        self.g_layers = global_layers
+        need_cache = extractor_layers + [global_layers[0]]
         self.momentum = momentum
         self.use_cpooling = use_cpooling
         assert merge_layer <= min(self.encoder_sampling)
@@ -338,12 +341,12 @@ class Extractor_Processor(nn.Module):
             assert self.nc == self.nci
             self.use_cache = use_cache
             self.cache_init = False
-            self.cache = {i: None for i in self.e_layers}
+            self.cache = {i: None for i in need_cache}
             self.l_cache = {i: None for i in self.encoder_sampling}
         else:
             self.queues = {name: {i: F.normalize(torch.randn(self.nc, *self.ori_window_size, embed_dim), dim=-1) if i >= merge_layer 
                                   else F.normalize(torch.randn(self.nc, 2, *self.ori_window_size, embed_dim), dim=-1)
-                                  for i in self.e_layers} for name in datasets_lw.keys()}
+                                  for i in need_cache} for name in datasets_lw.keys()}
             self.l_queues = {name: {i: F.normalize(torch.randn(self.nc, *self.ori_window_size, embed_dim), dim=-1) 
                                     for i in self.encoder_sampling} for name in datasets_lw.keys()}
             self.ptrs = {name: torch.zeros(1, dtype=int) for name in datasets_lw.keys()}
@@ -396,7 +399,7 @@ class Extractor_Processor(nn.Module):
                 rel_pos_zero_init=rel_pos_zero_init,
                 window_size=windowsize,
                 use_residual_block=i in residual_block_indexes,
-                input_size=input_size if i in extractor_layers else self.ori_window_size,
+                input_size=input_size if i in extractor_layers or i in global_layers else self.ori_window_size,
             )
             if use_act_checkpoint:
                 c_block = checkpoint_wrapper(c_block)
@@ -463,13 +466,13 @@ class Extractor_Processor(nn.Module):
             ic = self.queues[type[i]][idx]
             c_all.append(ic.cuda())
         c_all = torch.stack(c_all, dim=0)
-        c_all = c_all.transpose(1, 2)
         if idx >= self.merge_layer:
             for i in range(len(type)):
                 ptr = self.ptrs[type[i]]
                 self.queues[type[i]][idx][ptr:ptr + self.nci] = c[i]
                 self.ptrs[type[i]] = (ptr + self.nci) % self.nc
         else:
+            c_all = c_all.transpose(1, 2)
             for i in range(len(type)):
                 ptr = self.ptrs[type[i]]
                 self.queues[type[i]][idx][ptr:ptr + self.nci] = c[i].transpose(0, 1)
@@ -518,14 +521,25 @@ class Extractor_Processor(nn.Module):
                 else:   cc = torch.flatten(c_all, -4, -3)
                 x = torch.cat([cc, x], dim=-3)
                 x = self.blocks[idx](x, use_cait=True)
-            else:   x = self.blocks[idx](x)
-            c = self.c_blocks[idx](c)
+                c = self.c_blocks[idx](c)
+            elif idx in self.g_layers:
+                if idx - 1 not in self.g_layers:
+                    c_all = self.queue_sample_update(type, idx, c)
+                    cc = torch.mean(c_all, -4)
+                    x = torch.cat([cc, x], dim=-3)
+                x = self.blocks[idx](x)
+            else:
+                x = self.blocks[idx](x)
+                c = self.c_blocks[idx](c)
             if idx + 1 == self.merge_layer:
                 x = x.mean(1)
                 c = c.mean(1)
             if idx in self.encoder_sampling:
-                c_latent = self.lqueue_sample_update(type, idx, c)
-                latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
+                if idx in self.g_layers:    
+                    latent = self.norm(x)
+                else:
+                    c_latent = self.lqueue_sample_update(type, idx, c)
+                    latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
                 latents.append(latent)
         
         latents = torch.cat(latents, dim=-1)
@@ -575,7 +589,7 @@ class Extractor_Processor(nn.Module):
                 c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
 
         latents = []
-        for idx in range(self.depth):
+        for idx in range(self.depth):                
             if idx in self.e_layers:
                 if need_c:  self.cache_update(idx, c)
                 else:   c = self.cache_sample(B, idx)
@@ -583,17 +597,29 @@ class Extractor_Processor(nn.Module):
                 else:   cc = torch.flatten(c, -4, -3)
                 x = torch.cat([cc, x], dim=-3)
                 x = self.blocks[idx](x, use_cait=True)
-            else:   x = self.blocks[idx](x)
-            if need_c:  c = self.c_blocks[idx](c)
+                if need_c:  c = self.c_blocks[idx](c)
+            elif idx in self.g_layers:
+                if idx - 1 not in self.g_layers:
+                    if need_c:  self.cache_update(idx, c)
+                    else:   c = self.cache_sample(B, idx)
+                    cc = torch.mean(c, -4)
+                    x = torch.cat([cc, x], dim=-3)
+                x = self.blocks[idx](x)
+            else:
+                x = self.blocks[idx](x)
+                if need_c:  c = self.c_blocks[idx](c) # self.c_blocks[idx](c)
             if idx + 1 == self.merge_layer:
                 x = x.mean(1)
                 if need_c:  c = c.mean(1)
             if idx in self.encoder_sampling:
-                if need_c:
-                    c_latent = torch.mean(c, -4)
-                    self.lcache_update(idx, c_latent)
-                else:   c_latent = self.lcache_sample(B, idx)
-                latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
+                if idx in self.g_layers:
+                    latent = self.norm(x)
+                else:
+                    if need_c:
+                        c_latent = torch.mean(c, -4)
+                        self.lcache_update(idx, c_latent)
+                    else:   c_latent = self.lcache_sample(B, idx)
+                    latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
                 latents.append(latent)
         
         latents = torch.cat(latents, dim=-1)

@@ -2,7 +2,7 @@
 
 NUM_GPUS=1
 DATA_PATH=datasets
-name=EP_1
+name=EP_2
 python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12358 \
 	--use_env self_experiments/EP/finetune/multi_finetune_portal.py \
     --batch_size 2 \

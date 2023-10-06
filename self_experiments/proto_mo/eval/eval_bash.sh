@@ -2,7 +2,7 @@
 set -x
 
 GPUS=1
-MODEL_NAME="proto_mo_3"
+MODEL_NAME="proto_mo_2"
 CKPT_PATH="pretrained/painter_vit_large/painter_vit_large.pth"
 OUTPUT_DIR="workbench/eval_${MODEL_NAME}"
 

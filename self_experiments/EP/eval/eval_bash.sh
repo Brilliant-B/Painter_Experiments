@@ -2,7 +2,7 @@
 set -x
 
 GPUS=1
-MODEL_NAME="EP_0"
+MODEL_NAME="EP_2"
 CKPT_PATH="pretrained/painter_vit_large/painter_vit_large.pth"
 OUTPUT_DIR="workbench/eval_${MODEL_NAME}"
 

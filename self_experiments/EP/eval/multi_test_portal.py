@@ -28,10 +28,10 @@ from util.ddp_utils import DatasetTest
 from util import ddp_utils
 from util.pos_embed import (
     interpolate_pos_embed,
-    interpolate_rel_pos_embed_ep,
+    interpolate_rel_pos_embed_ep_pc,
 )
 
-import models.EP.EP_0 as painter_variant
+import models.EP.EP_2 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -222,8 +222,13 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
         seed=args.seed,
         n_contexts=args.nc,
         ni_contexts=args.nci,
-        extractor_layers=args.e_layers,
+        e_layer=args.e_layer,
+        g_layer=args.g_layer,
+        use_pc=args.use_pc,
+        insert_pc=args.insert_pc,
+        pc_skip=args.pc_skip,
         use_cpooling=args.use_cpooling,
+        momentum=args.momentum,
         is_infer=True,
         use_cache=args.use_cache,
     ).to("cuda")
@@ -248,7 +253,7 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
     # load checkpoint and interpolate
     checkpoint = torch.load(args.ckpt_path, map_location='cpu')['model']
     interpolate_pos_embed(model_without_ddp, checkpoint)
-    interpolate_rel_pos_embed_ep(model_without_ddp, checkpoint)
+    interpolate_rel_pos_embed_ep_pc(model_without_ddp, checkpoint)
     
     msg = model_without_ddp.load_state_dict(checkpoint, strict=False)
     if "vit" in args.ckpt_path:
@@ -288,7 +293,6 @@ def run_one_batch(type, c_query, c_target, query, model, device):
                        target.float().to(device), mask.float().to(device), valid.float().to(device))
     output = pred.detach().cpu()
     output = output * imagenet_std + imagenet_mean
-    assert output.shape[-1] == 3
     return output
 
 
@@ -501,13 +505,17 @@ if __name__ == '__main__':
     INFO['train_mask_ratio'] = args.train_mask_ratio = 0.99
     INFO['train_batch_size'] = args.train_batch_size = 128
     INFO['train_num_contexts'] = args.train_nc = 5
+    INFO['momentum'] = args.momentum = 0.99
     
-    args.e_layers = [0, 2, 4, 5] + [15, 16, 17, 18, 19, 20, 21, 22, 23]
-    INFO['extractor_layers'] = str(args.e_layers)
-    INFO['num_contexts_used'] = args.nc = INFO['num_contexts_input'] = args.nci = 3
+    INFO['num_contexts'] = args.nc = args.nci = 5
+    INFO['extract_layer'] = args.e_layer = 3
+    INFO['global_layer'] = args.g_layer = 18
+    INFO['use_pc'] = args.use_pc = True
+    INFO['insert_pc'] = args.insert_pc = True
+    INFO['pc_skip'] = args.pc_skip = True
     INFO['use_cpooling'] = args.use_cpooling = True
     
-    # INFO['ckpt_path'] = args.ckpt_path = "workbench/train_proto_mo_3/Joint|1:5:15:1:1:0:0.99|3:0.99/checkpoint-0-64000.pth"
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_EP_2/Joint|1:5:True|3:0.99/checkpoint-1-32000.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \

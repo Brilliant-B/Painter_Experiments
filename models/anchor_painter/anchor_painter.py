@@ -400,6 +400,7 @@ class Painter(nn.Module):
         # apply Transformer blocks
         out = []
         for idx, blk in enumerate(self.blocks):
+            print(x.shape)
             x = blk(x)
             if idx == merge_idx:
                 x = (x[:x.shape[0]//2] + x[x.shape[0]//2:]) * 0.5
