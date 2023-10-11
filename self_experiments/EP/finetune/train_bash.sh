@@ -19,4 +19,4 @@ python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12
     --data_path $DATA_PATH/ \
     --base_output_dir workbench/train_$name \
     --log_dir workbench/train_$name/tensorboard_logs \
-    --finetune pretrained/painter_vit_large/painter_vit_large.pth \
+    --finetune pretrained/pretrained_mae_vit_large/mae_pretrain_vit_large.pth \
