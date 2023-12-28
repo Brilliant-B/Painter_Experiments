@@ -5,3 +5,5 @@ xtcocotools # for pose
 natsort  # for denoising
 wandb
 deepspeed
+fairscale
+fvcore
