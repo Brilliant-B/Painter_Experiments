@@ -49,7 +49,7 @@ data_cfg = dict(
 )
 
 sigma = [1.5, 3]
-aug_idx = 0
+aug_idx = 1
 
 train_pipeline = [
     dict(type='LoadImageFromFile'),

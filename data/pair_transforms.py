@@ -158,8 +158,8 @@ class RandomResizedCrop(transforms.RandomResizedCrop):
         else:
             interpolation2 = InterpolationMode.BICUBIC
             
-        return F.resized_crop(img, i, j, h, w, self.size, interpolation1), \
-                F.resized_crop(tgt, i, j, h, w, self.size, interpolation2)
+        return F.resized_crop(img, i, j, h, w, self.size, interpolation1, antialias=True), \
+                F.resized_crop(tgt, i, j, h, w, self.size, interpolation2, antialias=True)
 
 
 class RandomHorizontalFlip(transforms.RandomHorizontalFlip):

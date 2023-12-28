@@ -1,11 +1,12 @@
 
 import os
 
-job_name = "painter_vit_large"
+job_name = "anchor_painter"
+settings = "original_settings"
 ckpt_file = "painter_vit_large.pth"
 prompt = "000000000165_box0"
 
-image_dir = '../../models_inference/{}/coco_pose_inference_{}_{}/'.format(job_name, ckpt_file, prompt)
+image_dir = '../../workbench/eval_{}/{}/coco_pose/'.format(job_name, settings, ckpt_file, prompt)
 if not image_dir[-1] == "/":
     image_dir = image_dir + '/'
 print(image_dir)

@@ -2,6 +2,7 @@
 import argparse
 import os
 import os.path as osp
+os.environ["CUDA_VISIBLE_DEVICES"] = "1, 2, 3, 4, 5, 6, 7"
 import sys
 sys.path.insert(0, "./")
 import tqdm

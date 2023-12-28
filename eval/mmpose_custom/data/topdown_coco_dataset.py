@@ -65,7 +65,9 @@ class TopDownCocoDatasetCustom(TopDownCocoDataset):
                  pipeline,
                  dataset_info=None,
                  test_mode=False):
-
+        
+        self.imagename_with_boxid = data_cfg.get('imagename_with_boxid', False)
+        
         super().__init__(
             ann_file,
             img_prefix,
@@ -74,7 +76,7 @@ class TopDownCocoDatasetCustom(TopDownCocoDataset):
             dataset_info=dataset_info,
             test_mode=test_mode)
 
-        self.imagename_with_boxid = data_cfg.get('imagename_with_boxid', False)
+        # self.imagename_with_boxid = data_cfg.get('imagename_with_boxid', False)
 
     def _load_coco_keypoint_annotation_kernel(self, img_id):
         """load annotation from COCOAPI.

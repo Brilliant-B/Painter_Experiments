@@ -1,8 +1,9 @@
 __pycache__
 datasets/
-# toy_datasets/
+data/mmdet_custom/work_dirs/
+data/mmpose_custom/work_dirs/
+toy_datasets/
 pretrained/
-models_inference/
 workbench/
 wandb
 temp.py
@@ -14,3 +15,4 @@ temp.py
 log.txt
 log*.txt
 *log.txt
+*.zip

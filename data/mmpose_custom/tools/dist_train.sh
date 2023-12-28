@@ -11,7 +11,7 @@ MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 PYTHONPATH="$(dirname $0)/..":$PYTHONPATH \
 python -m torch.distributed.launch --nproc_per_node=1 \
     --use-env $(dirname "$0")/train.py \
-    $CONFIG
+    $CONFIG \
     --launcher pytorch ${@:3}
 
 

@@ -145,6 +145,8 @@ class SaveDataPairCustom:
             aug_idx += 1
             image_path = os.path.join(output_dir, file_name.replace(".jpg", "_image_{}_{}.png".format(self.dir_name, aug_idx)))
             label_path = os.path.join(output_dir, file_name.replace(".jpg", "_label_{}_{}.png".format(self.dir_name, aug_idx)))
+        # print(img_pil, label_pil)
+        # print(image_path, label_path)
         img_pil.save(image_path)
         label_pil.save(label_path)
 

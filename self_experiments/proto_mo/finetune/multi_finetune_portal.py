@@ -472,9 +472,9 @@ if __name__ == '__main__':
     
     INFO['epochs'] = args.epochs = 3
     INFO['save_freq'] = args.save_itrs = 32000
-    INFO['batch_size'] = args.batch_size = 2
+    INFO['batch_size'] = args.batch_size = 4
     INFO['accum_iter'] = args.accum_iter = 64
-    INFO['learning_rate'] = args.lr = 7.5e-4 # 1e-4
+    INFO['learning_rate'] = args.lr = 1e-4
     INFO['warmup_itrs'] = args.warmup_itrs = 2048
 
     INFO['joint_train'] = args.joint_datasets = True

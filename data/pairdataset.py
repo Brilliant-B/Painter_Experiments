@@ -59,7 +59,7 @@ class PairDataset(VisionDataset):
             self.pairs.extend(cur_pairs)
             cur_num = len(cur_pairs)
             self.weights.extend([type_weight_list[idx] * 1./cur_num]*cur_num)
-            print(json_path, type_weight_list[idx])
+            # print(json_path, type_weight_list[idx])
         self.use_two_pairs = use_two_pairs
         if self.use_two_pairs:
             self.pair_type_dict = {}
@@ -69,8 +69,6 @@ class PairDataset(VisionDataset):
                         self.pair_type_dict[pair["type"]] = [idx]
                     else:
                         self.pair_type_dict[pair["type"]].append(idx)
-            for t in self.pair_type_dict:
-                print(t, len(self.pair_type_dict[t]))
         self.transforms = PairStandardTransform(transform, target_transform) if transform is not None else None
         self.transforms2 = PairStandardTransform(transform2, target_transform) if transform2 is not None else None
         self.transforms3 = PairStandardTransform(transform3, target_transform) if transform3 is not None else None
@@ -78,6 +76,10 @@ class PairDataset(VisionDataset):
         self.masked_position_generator = masked_position_generator
         self.half_mask_ratio = half_mask_ratio
 
+    def print_datasets(self):
+        for t in self.pair_type_dict:
+            print(t, len(self.pair_type_dict[t]))
+    
     def _load_image(self, path: str) -> Image.Image:
         while True:
             try:

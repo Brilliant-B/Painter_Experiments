@@ -24,6 +24,7 @@ imagenet_std=torch.tensor([0.229, 0.224, 0.225])
 class PairDataset(VisionDataset):
     def __init__(
         self,
+        is_train,
         args,
         json_path_list: list,
         transform: Optional[Callable] = None,
@@ -33,8 +34,10 @@ class PairDataset(VisionDataset):
         target_transform: Optional[Callable] = None,
         transforms: Optional[Callable] = None,
         masked_position_generator: Optional[Callable] = None,
+        global_rank: int = 0,
     ) -> None:
         super().__init__(args.data_path, transforms, transform, target_transform)
+        self.is_train = is_train
         self.pairs = []
         self.weights = []
         type_weight_list = [0.2, 0.3, 0.15, 0.05, 0.1, 0.15, 0.15, 0.05]
@@ -52,8 +55,10 @@ class PairDataset(VisionDataset):
                     self.pair_type_dict[pair["type"]] = [idx]
                 else: 
                     self.pair_type_dict[pair["type"]].append(idx)
-        for t in self.pair_type_dict:
-            print(t, len(self.pair_type_dict[t]))
+        if global_rank == 0:
+            print(f"> {'train' if is_train else 'val'} dataset")
+            for t in self.pair_type_dict:
+                print(' ', t, len(self.pair_type_dict[t]))
         
         self.transforms = PairStandardTransform(transform, target_transform) if transform is not None else None
         self.transforms2 = PairStandardTransform(transform2, target_transform) if transform2 is not None else None
@@ -61,9 +66,9 @@ class PairDataset(VisionDataset):
         self.transforms_seccrop = PairStandardTransform(transform_seccrop, target_transform) if transform_seccrop is not None else None
         self.masked_position_generator = masked_position_generator
         self.img_size = args.img_size
-        self.nci = args.nci
+        self.nci = args.nci if is_train else args.nc
         if masked_position_generator is not None:
-            self.mask_ratio = args.mask_ratio
+            self.mask_ratio = args.mask_ratio if is_train else 1.0
             self.ori_window_size = self.masked_position_generator.get_shape()
             
 
@@ -165,13 +170,13 @@ class PairDataset(VisionDataset):
             thres = (thres - imagenet_mean) / imagenet_std
             valid[target > thres[None, None, :]] = 10.0
             fg = target > thres[None, None, :]
-            if fg.sum() < 100*3:
+            if fg.sum() < 50*3: # 100*3
                 valid = valid * 0.
         elif "image2panoptic_inst" in pair_type:
             thres = torch.ones(3) * (1e-5) # ignore black
             thres = (thres - imagenet_mean) / imagenet_std
             fg = target > thres[None, None, :]
-            if fg.sum() < 100*3:
+            if fg.sum() < 50*3: # 100*3
                 valid = valid * 0.
         assert valid.shape == (*self.img_size, 3)
         return pair_type, c_query, c_target, query, target, mask, valid

@@ -490,7 +490,7 @@ if __name__ == '__main__':
     INFO['num_val'] = args.num_val = 50
     dataset_names = [
         "ade20k_image2semantic",
-        "coco_image2panoptic_sem_seg",
+        # "coco_image2panoptic_sem_seg",
         "nyuv2_image2depth",
         "lol_image2enhance",
         # "derain_image2derain",
@@ -507,15 +507,15 @@ if __name__ == '__main__':
     INFO['train_num_contexts'] = args.train_nc = 5
     INFO['momentum'] = args.momentum = 0.99
     
-    INFO['num_contexts'] = args.nc = args.nci = 5
-    INFO['extract_layer'] = args.e_layer = 3
-    INFO['global_layer'] = args.g_layer = 18
-    INFO['use_pc'] = args.use_pc = True
+    INFO['num_contexts'] = args.nc = args.nci = 1
+    INFO['extract_layer'] = args.e_layer = 0
+    INFO['global_layer'] = args.g_layer = 0
+    INFO['use_pc'] = args.use_pc = False
     INFO['insert_pc'] = args.insert_pc = True
     INFO['pc_skip'] = args.pc_skip = True
     INFO['use_cpooling'] = args.use_cpooling = True
     
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_EP_2/Joint|1:5:True|3:0.99/checkpoint-1-32000.pth"
+    # INFO['ckpt_path'] = args.ckpt_path = "workbench/train_EP_2/Joint|1:5:True|3:0.99/checkpoint-1-32000.pth"
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \

@@ -41,12 +41,13 @@ def train_one_epoch(model: torch.nn.Module,
     metric_logger = misc.MetricLogger(delimiter="  ", log_file=log_file)
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch [{}]'.format(epoch)
-    print_freq = accum_iter = args.accum_iter
+    accum_iter = args.accum_iter
+    print_freq = accum_iter
     if log_writer is not None:
         print('tensorboard_log_dir: {}'.format(log_writer.log_dir))
 
     wandb_images = []
-    for data_iter_step, (type, c_query, c_target, query, target, mask, valid) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+    for data_iter_step, (type, c_query, c_target, query, target, mask, valid) in enumerate(metric_logger.log_every(data_loader, print_freq, header, global_rank)):
         # per iteration lr_scheduler
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, epoch * len(data_loader) + data_iter_step + 1, args.epochs * len(data_loader), args)

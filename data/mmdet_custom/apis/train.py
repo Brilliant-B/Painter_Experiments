@@ -4,7 +4,7 @@ import os
 import random
 import sys
 import tqdm
-
+# sys.path.append(r'/home/barryli/Painter_Exp/')
 import numpy as np
 import torch
 import torch.distributed as dist
@@ -17,6 +17,7 @@ from mmdet.datasets import (build_dataloader, build_dataset,
                             replace_ImageToTensor)
 from mmdet.utils import (build_ddp, build_dp, compat_cfg,
                          find_latest_checkpoint, get_root_logger)
+# from data.mmdet_custom.data.pipelines.transforms import SaveDataPairCustom
 
 
 def train_detector(model,
@@ -50,6 +51,7 @@ def train_detector(model,
         **train_dataloader_default_args,
         **cfg.data.get('train_dataloader', {})
     }
+    print(train_dataloader_default_args)
 
     load_data_only = cfg.custom.get('load_data_only', False)
     assert load_data_only
@@ -57,9 +59,12 @@ def train_detector(model,
     # train_loader_cfg_custom['shuffle'] = False  # we prefer gen data in order
     # train_loader_cfg_custom['dist'] = False
     data_loaders = [build_dataloader(ds, **train_loader_cfg_custom) for ds in dataset]
+    
+    # save = SaveDataPairCustom()
     # only enumerate dataset
     for data_loader in data_loaders:
         for _ in tqdm.tqdm(data_loader):
+            # print(type(_), len(_))
             pass
     print("dataset enumerated, exit!")
     sys.exit()

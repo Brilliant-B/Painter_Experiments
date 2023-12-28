@@ -440,11 +440,13 @@ if __name__ == '__main__':
     INFO = dict()
     INFO['seed'] = args.seed = 1
     INFO['num_val'] = args.num_val = 50
+    INFO['checkpoint'] = args.ckpt_path = 'workbench/train_anchor_painter/checkpoint-1.pth'
     dataset_names = [
+        # "coco_pose",
         "ade20k_image2semantic",
-        "coco_image2panoptic_sem_seg",
+        # "coco_image2panoptic_sem_seg",
         "nyuv2_image2depth",
-        "lol_image2enhance",
+        # "lol_image2enhance",
         # "derain_image2derain",
         # "ssid_image2denoise",
     ]

@@ -1,7 +1,7 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1, 2, 3, 4, 5, 6, 7"
 import sys
-sys.path.append(r'/root/autodl-tmp/Painter/')
+sys.path.append(r'/home/barryli/Painter_Exp/')
 import argparse
 import datetime
 import json
@@ -48,7 +48,7 @@ TRAIN_JSON_BANK = {
     "lol_image2enhance": "light_enhance/enhance_lol_train.json",
     "ssid_image2denoise": "denoise/denoise_ssid_train.json",
     "coco_pano_inst": "coco/pano_ca_inst/coco_train_image_panoptic_inst.json",
-    "coco_pose": "coco_pose/coco_pose_256x192_train.json",
+    "coco_image2pose": "coco_pose/coco_pose_256x192_train.json",
 }
 
 VAL_JSON_BANK = {
@@ -59,12 +59,14 @@ VAL_JSON_BANK = {
     "lol_image2enhance": "light_enhance/enhance_lol_val.json",
     "ssid_image2denoise": "denoise/denoise_ssid_val.json",
     "coco_pano_inst": "coco/pano_ca_inst/coco_val_image_panoptic_inst.json",
-    "coco_pose": "coco_pose/coco_pose_256x192_val.json",
+    "coco_image2pose": "coco_pose/coco_pose_256x192_val.json",
 }
 
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Painter_Variant_2 fine-tuning', add_help=False)
+    parser.add_argument('--n_gpu', default=1, type=int, 
+                        help='number of GPUs')
     parser.add_argument('--batch_size', default=2, type=int, 
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=15, type=int)
@@ -195,10 +197,11 @@ def prepare_model(args, prints=False):
     ).to("cuda")
     
     if args.finetune:
-        checkpoint = torch.load(args.finetune, map_location='cpu')['model']    
+        checkpoint = torch.load(args.finetune, map_location='cpu')['model']
         # interpolate position embedding
-        interpolate_pos_embed(model, checkpoint)
-        interpolate_rel_pos_embed_ep_pc(model, checkpoint)
+        if 'mae' not in args.finetune:
+            interpolate_pos_embed(model, checkpoint)
+            interpolate_rel_pos_embed_ep_pc(model, checkpoint)
         # interpolate patch embedding
         if "patch32" in args.model:
             patch_weight = checkpoint['patch_embed.proj.weight']
@@ -236,7 +239,7 @@ def prepare_model(args, prints=False):
 
 
 
-def prepare_data(args, prints=False):
+def prepare_data(args, global_rank, prints=False):
     transform_train = pair_transforms.Compose([
             pair_transforms.RandomResizedCrop(args.img_size[1], scale=(args.min_random_scale, 1.0), interpolation=3),  # 3 is bicubic
             pair_transforms.RandomApply([pair_transforms.ColorJitter(0.4, 0.4, 0.2, 0.1)], p=0.8),
@@ -266,7 +269,7 @@ def prepare_data(args, prints=False):
     )
     dataset_train = PairDataset(args, args.json_path, transform=transform_train, transform2=transform_train2, 
                                 transform3=transform_train3, transform_seccrop=transform_train_seccrop, 
-                                masked_position_generator=masked_position_generator)
+                                masked_position_generator=masked_position_generator, global_rank=global_rank)
     # dataset_val = PairDataset(args.data_path, args.val_json_path, args=args, transform=transform_val, transform2=None, transform3=None, 
     #                           masked_position_generator=masked_position_generator, mask_ratio=1.)
     if prints:  print(dataset_train)
@@ -300,7 +303,8 @@ def init_model_queue(args, model):
 
 def main(args, INFO):
     device = torch.device(args.device)
-    seed = args.seed + misc.get_rank()
+    global_rank = misc.get_rank()
+    seed = args.seed + global_rank
     torch.manual_seed(seed)
     np.random.seed(seed)
     
@@ -309,15 +313,19 @@ def main(args, INFO):
         f"{mix_data}|{args.nci}:{args.nc}:{args.use_cpooling}|{args.finetune_code}:{args.mask_ratio}")
     train_log_dir = os.path.join(output_dir, "train_log.log")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    print('output_dir: {}'.format(output_dir))
-    print('job_dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
+    if global_rank == 0:
+        print('output_dir: {}'.format(output_dir))
+        print('job_dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     
     # define the model
-    print("[Prepare Model]")
-    with open(Path(train_log_dir), 'a') as f:
-        print(json.dumps(INFO, sort_keys=False, indent=4), file=f)
-        print(json.dumps(INFO, sort_keys=False, indent=4))
+    if global_rank == 0:    
+        print("[Prepare Model]")
+        with open(Path(train_log_dir), 'a') as f:
+            print(json.dumps(INFO, sort_keys=False, indent=4), file=f)
+            print(json.dumps(INFO, sort_keys=False, indent=4))
     model = prepare_model(args)
+    
+    eff_batch_size = args.total_batch_size
     args.patch_size = patch_size = model.patch_size
     args.window_size = (args.img_size[0] // patch_size, args.img_size[1] // patch_size)
     model.to(device)
@@ -337,7 +345,7 @@ def main(args, INFO):
         assert model.gradient_accumulation_steps() == args.accum_iter
     else:
         if args.distributed:
-            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True) # 
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu]) # , find_unused_parameters=True
             model_without_ddp = model.module
         # following timm: set wd as 0 for bias and norm layers
         param_groups = lrd.param_groups_lrd(model_without_ddp, args.weight_decay,
@@ -349,10 +357,9 @@ def main(args, INFO):
         # print(optimizer)
 
     # define and augment the datasets
-    print("[Prepare Data]")
+    if global_rank == 0:    print("[Prepare Data]")
     num_tasks = misc.get_world_size()
-    global_rank = misc.get_rank()
-    dataset_train = prepare_data(args)
+    dataset_train = prepare_data(args, global_rank)
     num_samples_train = len(dataset_train)
     weights_train = dataset_train.weights
     sampler_train = torch.utils.data.WeightedRandomSampler(weights_train, num_samples_train, replacement=True)
@@ -391,21 +398,19 @@ def main(args, INFO):
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
     
     # initialize the model queue:
-    print("[Initialize Model Queue]")
+    if global_rank == 0:    print("[Initialize Model Queue]")
     init_model_queue(args, model_without_ddp)
     
-    # show important hyper-parameters
-    print("[Important Hyper-Parameters]")
-    eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    if args.lr is None:  # only base_lr is specified
-        args.lr = args.blr * eff_batch_size / 256
-    print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
-    print("actual lr: %.2e" % args.lr)
-    print("accumulate grad iterations: %d" % args.accum_iter)
-    print("effective batch size: %d" % eff_batch_size)
+    # show important hyper-parameters 
+    if global_rank == 0: 
+        print("[Important Hyper-Parameters]")
+        print("base lr: %.2e" % (args.lr * 256 / eff_batch_size))
+        print("actual lr: %.2e" % args.lr)
+        print("accumulate grad iterations: %d" % args.accum_iter)
+        print("effective batch size: %d" % eff_batch_size)
 
     # start training
-    print(f"[Start training for {args.epochs} epochs]")
+    if global_rank == 0:    print(f"[Start training for {args.epochs} epochs]")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
@@ -426,7 +431,7 @@ def main(args, INFO):
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Done! Training time {}\n'.format(total_time_str))
+    if global_rank == 0:    print('Done! Training time {}\n'.format(total_time_str))
 
     if global_rank == 0 and args.log_wandb:
         wandb.finish()
@@ -444,11 +449,12 @@ if __name__ == '__main__':
     INFO['seed'] = args.seed = 0
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
         "ade20k_image2semantic": 10,
-        "coco_image2panoptic_sem_seg": 11,
-        "nyuv2_image2depth": 9,
-        "lol_image2enhance": 5,
-        "derain_image2derain": 5,
-        "ssid_image2denoise": 8,
+        "coco_image2panoptic_sem_seg": 10,
+        "nyuv2_image2depth": 10,
+        "coco_image2pose": 10,
+        # "lol_image2enhance": 5,
+        # "derain_image2derain": 5,
+        # "ssid_image2denoise": 8,
     }
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
@@ -456,22 +462,28 @@ if __name__ == '__main__':
         val_json_path.append(os.path.join(args.data_path, VAL_JSON_BANK[dataset_name]))
     args.json_path, args.val_json_path = json_path, val_json_path
     
-    INFO['epochs'] = args.epochs = 3
-    INFO['save_freq'] = args.save_itrs = 32000
-    INFO['batch_size'] = args.batch_size = 2
-    INFO['accum_iter'] = args.accum_iter = 64
-    INFO['learning_rate'] = args.lr = 1e-4
-    INFO['warmup_itrs'] = args.warmup_itrs = 2048
-
+    assert args.n_gpu == misc.get_world_size()
+    INFO['epochs'] = args.epochs = 15
+    INFO['save_freq'] = args.save_itrs = 16195
+    INFO['batch_size'] = args.batch_size = 4
+    INFO['accum_iter'] = args.accum_iter = 128
+    INFO['total_batch_size'] = args.total_batch_size = args.batch_size * args.accum_iter * args.n_gpu
+    INFO['actual_lr'] = args.lr = None
+    INFO['base_lr'] = args.blr = 1e-3
+    INFO['warmup_itrs'] = args.warmup_itrs = args.save_itrs
+    INFO['initial_weights'] = args.finetune = "pretrained/pretrained_mae_vit_large/mae_pretrain_vit_large.pth"
+    if args.lr is None: INFO['actual_lr'] = args.lr = args.blr * args.total_batch_size / 256
+    else:   INFO['base_lr'] = args.blr = args.lr * 256 / args.total_batch_size
+    
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 3
     INFO['mask_ratio'] = args.mask_ratio = 0.99
     
-    INFO['num_contexts_used'] = args.nc = 5
+    INFO['num_contexts_used'] = args.nc = 1
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['extract_layer'] = args.e_layer = 3
-    INFO['global_layer'] = args.g_layer = 18
-    INFO['use_pc'] = args.use_pc = True
+    INFO['extract_layer'] = args.e_layer = 0
+    INFO['global_layer'] = args.g_layer = 12
+    INFO['use_pc'] = args.use_pc = False
     INFO['insert_pc'] = args.insert_pc = True
     INFO['pc_skip'] = args.pc_skip = True
     INFO['use_cpooling'] = args.use_cpooling = True

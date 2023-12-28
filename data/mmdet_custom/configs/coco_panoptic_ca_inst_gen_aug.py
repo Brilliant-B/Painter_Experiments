@@ -8,6 +8,7 @@ num_classes = num_things_classes + num_stuff_classes
 model = None
 
 # dataset settings
+aug_idx = 0
 image_size = (1024, 1024)
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
@@ -32,11 +33,11 @@ train_pipeline = [
         crop_type='absolute',
         recompute_bbox=True,
         allow_negative_crop=True),
-    # dict(type='Normalize', **img_norm_cfg),
+    dict(type='Normalize', **img_norm_cfg),
     dict(type='Pad', size=image_size),
     dict(
         type='SaveDataPairCustom',
-        dir_name='train_aug0',
+        dir_name=f'train_aug{aug_idx}',
         target_path='../../datasets/coco/pano_ca_inst',
     ),  # custom, we don't care the transforms afterward
     dict(type='DefaultFormatBundle', img_to_float=True),

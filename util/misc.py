@@ -122,7 +122,7 @@ class MetricLogger(object):
     def add_meter(self, name, meter):
         self.meters[name] = meter
 
-    def log_every(self, iterable, print_freq, header=None):
+    def log_every(self, iterable, print_freq, header=None, global_rank=0):
         i = 0
         if not header:
             header = ''
@@ -147,39 +147,41 @@ class MetricLogger(object):
             data_time.update(time.time() - end)
             yield obj
             iter_time.update(time.time() - end)
-            if i % print_freq == 0 or i == len(iterable) - 1:
-                eta_seconds = iter_time.global_avg * (len(iterable) - i)
-                eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
-                if torch.cuda.is_available():
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time),
-                        memory=torch.cuda.max_memory_allocated() / MB))
-                    if self.log_file:
-                        with open(self.log_file, 'a') as f:
-                            print(log_msg.format(
-                                i, len(iterable), eta=eta_string,
-                                meters=str(self),
-                                time=str(iter_time), data=str(data_time),
-                                memory=torch.cuda.max_memory_allocated() / MB), file=f)
-                else:
-                    print(log_msg.format(
-                        i, len(iterable), eta=eta_string,
-                        meters=str(self),
-                        time=str(iter_time), data=str(data_time)))
-                    if self.log_file:
-                        with open(self.log_file, 'a') as f:
-                            print(log_msg.format(
-                                i, len(iterable), eta=eta_string,
-                                meters=str(self),
-                                time=str(iter_time), data=str(data_time)), file=f)
+            if global_rank == 0:
+                if i % print_freq == 0 or i == len(iterable) - 1:
+                    eta_seconds = iter_time.global_avg * (len(iterable) - i)
+                    eta_string = str(datetime.timedelta(seconds=int(eta_seconds)))
+                    if torch.cuda.is_available():
+                        print(log_msg.format(
+                            i, len(iterable), eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time),
+                            memory=torch.cuda.max_memory_allocated() / MB))
+                        if self.log_file:
+                            with open(self.log_file, 'a') as f:
+                                print(log_msg.format(
+                                    i, len(iterable), eta=eta_string,
+                                    meters=str(self),
+                                    time=str(iter_time), data=str(data_time),
+                                    memory=torch.cuda.max_memory_allocated() / MB), file=f)
+                    else:
+                        print(log_msg.format(
+                            i, len(iterable), eta=eta_string,
+                            meters=str(self),
+                            time=str(iter_time), data=str(data_time)))
+                        if self.log_file:
+                            with open(self.log_file, 'a') as f:
+                                print(log_msg.format(
+                                    i, len(iterable), eta=eta_string,
+                                    meters=str(self),
+                                    time=str(iter_time), data=str(data_time)), file=f)
             i += 1
             end = time.time()
         total_time = time.time() - start_time
         total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-        print('{} Total time: {} ({:.4f} s / it)'.format(
-            header, total_time_str, total_time / len(iterable)))
+        if global_rank == 0:
+            print('{} Total time: {} ({:.4f} s / it)'.format(
+                header, total_time_str, total_time / len(iterable)))
 
 
 def setup_for_distributed(is_master):
@@ -325,6 +327,26 @@ def save_model(args, epoch, itr, model, model_without_ddp, optimizer, loss_scale
         client_state = {'epoch': epoch}
         model.save_checkpoint(save_dir=args.output_dir, tag=f"checkpoint-{epoch}-{itr}.pth", client_state=client_state)
     print(f"Successfully Saved Checkpoint-{epoch}-{itr}.pth")
+
+
+def save_model_ori(args, epoch, model, model_without_ddp, optimizer, loss_scaler):
+    output_dir = Path(args.output_dir)
+    epoch_name = str(epoch)
+    if loss_scaler is not None:
+        checkpoint_paths = [output_dir / ('checkpoint-%s.pth' % epoch_name)]
+        for checkpoint_path in checkpoint_paths:
+            to_save = {
+                'model': model_without_ddp.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'epoch': epoch,
+                'scaler': loss_scaler.state_dict(),
+                'args': args,
+            }
+
+            save_on_master(to_save, checkpoint_path)
+    else:
+        client_state = {'epoch': epoch}
+        model.save_checkpoint(save_dir=args.output_dir, tag="checkpoint-%s" % epoch_name, client_state=client_state)
 
 
 def load_model(args, model_without_ddp, optimizer, loss_scaler):
