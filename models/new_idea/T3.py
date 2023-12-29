@@ -284,6 +284,7 @@ class T_Painter(nn.Module):
             collect_depth=12,
             num_registers=64,
             init_layerscale=1e-4,
+            c_momentum=0.99,
             is_infer=False,
             use_cache=True,
             
@@ -331,6 +332,7 @@ class T_Painter(nn.Module):
         self.collect_depth = collect_depth
         self.num_register = num_registers
         self.init_layerscale = init_layerscale
+        self.c_momentum = c_momentum
         assert merge_layer <= min(self.encoder_sampling)
         assert merge_layer <= collect_depth
         assert self.nc % self.nci == 0
@@ -339,9 +341,8 @@ class T_Painter(nn.Module):
             self.use_cache = use_cache
         else:
             self.need_loss_cal = min(datasets_lw.values()) < max(datasets_lw.values())
-            if not self.nc == self.nci:
-                self.reg_buffer = {name: torch.randn(n_contexts-ni_contexts, num_registers, embed_dim) for name in datasets_lw.keys()}
-                self.ptrs = {name: 0 for name in datasets_lw.keys()}
+            self.c_buffer = {name: torch.randn(n_contexts, *self.ori_window_size, embed_dim) for name in datasets_lw.keys()}
+            self.ptrs = {name: 0 for name in datasets_lw.keys()}
         
         self.mask_token = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
         self.segment_token_x = nn.Parameter(torch.zeros(1, 1, 1, embed_dim))
@@ -381,6 +382,28 @@ class T_Painter(nn.Module):
             if use_act_checkpoint:
                 e_block = checkpoint_wrapper(e_block)
             self.e_blocks.append(e_block)
+        
+        self.c_blocks = nn.ModuleList()
+        for i in range(self.depth):
+            c_block = Block(
+                dim=embed_dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+                norm_layer=norm_layer,
+                act_layer=act_layer,
+                use_rel_pos=use_rel_pos,
+                rel_pos_zero_init=rel_pos_zero_init,
+                window_size=int(i in window_block_indexes)*window_size,
+                use_residual_block=i in residual_block_indexes,
+                use_cait=False,
+                ls_init=init_layerscale,
+                input_size=self.ori_window_size,
+            )
+            if use_act_checkpoint:
+                c_block = checkpoint_wrapper(c_block)
+            self.c_blocks.append(c_block)
         
         self.blocks = nn.ModuleList()
         for i in range(self.depth):
@@ -443,24 +466,35 @@ class T_Painter(nn.Module):
         return {'pos_embed', 'reg_pos_embed', 'cls_token', 'registers'}
     
     @torch.no_grad()
-    def reg_update_sample(self, reg, type):
-        # reg: [B, nci, n, C]; type: {B(i): dataset_name}
-        reg_full = []
-        for i in range(len(type)):
-            reg_item = self.reg_buffer[type[i]]
-            reg_full.append(reg_item.cuda())
-            ptr = self.ptrs[type[i]]
-            self.reg_buffer[type[i]][ptr:ptr+self.nci] = reg[i]
-            self.ptrs[type[i]] = (ptr + self.nci) % (self.nc - self.nci)
-        # reg_full: [B, nc-nci, n, C]
-        reg_full = torch.stack(reg_full, dim=0)
-        return reg_full
+    def init_copy_c_blocks(self):
+        for (name_c, param_c), param_q in zip(self.c_blocks.named_parameters(), self.blocks[:self.collect_depth].parameters()):
+            tmp_q = param_q.data
+            if "attn.rel_pos_h" in name_c:
+                tmp_q = F.interpolate(tmp_q.permute(1, 0).unsqueeze(0), size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
+            param_c.data.copy_(tmp_q)
+            param_c.requires_grad = False
     
-    def reg_transform(self, reg, type):
-        # reg: [B, nci, n, C]
-        if not self.nc == self.nci:
-            reg_full = self.reg_update_sample(reg, type)
-            reg = torch.cat([reg, reg_full], dim=1)
+    @torch.no_grad()
+    def c_blocks_momentum_update(self):
+        for param_c, param_q in zip(self.c_blocks.parameters(), self.blocks[:self.collect_depth].parameters()):
+            param_c.data = param_c.data * self.c_momentum + param_q.data * (1. - self.c_momentum)
+    
+    @torch.no_grad()
+    def c_transform(self, c, type):
+        # c: [B, nci, H, W, C]; type: {B(i): dataset_name}
+        c_full = []
+        for i in range(len(type)):
+            ptr = self.ptrs[type[i]]
+            self.c_buffer[type[i]][ptr:ptr+self.nci] = c[i]
+            self.ptrs[type[i]] = (ptr + self.nci) % self.nc
+            c_item = self.c_buffer[type[i]]
+            c_full.append(c_item.cuda())
+        # c_full: [B, nc, H, W, C]
+        c_full = torch.stack(c_full, dim=0)
+        return c_full
+            
+    def reg_transform(self, reg):
+        # reg: [B, nc, n, C]
         # omitted: reg index randperm + reg context embedding
         reg = self.reg_embed(reg)
         reg = reg.flatten(1, 2)
@@ -487,26 +521,26 @@ class T_Painter(nn.Module):
         if self.pos_embed is not None:
             c = c + get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
         
-        x = torch.cat([x.unsqueeze(2), c], dim=-4)
-        reg = self.registers.expand(B, self.nci, -1, -1)
+        reg = self.registers.expand(B, self.nc, -1, -1)
         if self.reg_pos_embed is not None:
             reg = reg + self.reg_pos_embed
         
-        # {x c}: [B, 2, 1+nci, Hp, Wp, C]; reg: [B, nci, n, C]
+        # {x c}: [B, 2, 1+nci, Hp, Wp, C]; reg: [B, nc, n, C]
         latents = []
         for idx in range(self.collect_depth):
             x = self.blocks[idx](x)
+            c = self.c_blocks[idx](c)
             if idx + 1 == self.merge_layer:
                 x = x.mean(1)
+                c = c.mean(1)
             if idx in self.encoder_sampling:
-                latents.append(self.norm(x[:, 0]))
-        splited = x.split([1, self.nci], dim=-4)
-        x, c = torch.squeeze(splited[0], dim=-4), splited[1]
+                latents.append(self.norm(x))
         
-        # x: [B, Hp, Wp, C]; c: [B, nci, Hp, Wp, C]
+        # x: [B, Hp, Wp, C]; c: [B, nc, Hp, Wp, C]
+        c = self.c_transform(c, type)
         for idx in range(self.extract_layers):
             c, reg = self.e_blocks[idx](c, reg)
-        reg = self.reg_transform(reg, type)
+        reg = self.reg_transform(reg)
         
         # reg: [B, nc*n, C]
         for idx in range(self.collect_depth, self.depth):
@@ -581,7 +615,7 @@ class T_Painter(nn.Module):
             return loss, pred, image_mask
 
 
-def T2_patch16_win_dec64_8glb_sl1(**kwargs):
+def T3_patch16_win_dec64_8glb_sl1(**kwargs):
     model = T_Painter(
         img_size=(448, 448), patch_size=16, embed_dim=1024, depth=24, num_heads=16,
         drop_path_rate=0.1, window_size=14, qkv_bias=True,

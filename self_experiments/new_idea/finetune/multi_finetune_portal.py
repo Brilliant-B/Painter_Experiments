@@ -37,7 +37,7 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.new_idea.T2 as painter_variant
+import models.new_idea.T3 as painter_variant
 from self_experiments.new_idea.finetune.engine_train import train_one_epoch, evaluate_pt
 
 TRAIN_JSON_BANK = {
@@ -189,6 +189,7 @@ def prepare_model(args, prints=False):
         collect_depth=args.collect_depth,
         num_registers=args.num_registers,
         init_layerscale=args.init_layerscale,
+        c_momentum=args.c_momentum,
         is_infer=False,
     ).to("cuda")
     
@@ -201,6 +202,7 @@ def prepare_model(args, prints=False):
         collect_depth=args.collect_depth,
         num_registers=args.num_registers,
         init_layerscale=args.init_layerscale,
+        c_momentum=args.c_momentum,
         is_infer=False,
     ).to("cuda")
     
@@ -283,7 +285,7 @@ def main(args, INFO):
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     output_dir = args.output_dir = os.path.join(args.base_output_dir, \
-        f"{mix_data}|{args.nc}|{args.collect_depth}:{args.extract_layers}|{args.num_registers}")
+        f"{mix_data}|{args.nc}|{args.num_registers}|{args.collect_depth}|{args.extract_layers}")
     train_log_dir = os.path.join(output_dir, "train_log.log")
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     if global_rank == 0:
@@ -392,7 +394,7 @@ def main(args, INFO):
         test_stats = evaluate_pt(
             data_loader_val, val_model, device, 
             epoch=epoch, global_rank=global_rank, args=args
-        ) if epoch % 2 else dict()
+        )
         log_stats = {
             'epoch': epoch,
             **{f'train_{k}': v for k, v in train_stats.items()}, 
@@ -451,11 +453,12 @@ if __name__ == '__main__':
     INFO['joint_train'] = args.joint_datasets = True
     INFO['mask_ratio'] = args.mask_ratio = 1.0
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['num_contexts_used'] = args.nc = 10
+    INFO['num_contexts_used'] = args.nc = 3
     INFO['extract_layers'] = args.extract_layers = 6
     INFO['collect_depth'] = args.collect_depth = 12
     INFO['num_registers'] = args.num_registers = 64
     INFO['init_layerscale'] = args.init_layerscale = 0.1
+    INFO['c_momentum'] = args.c_momentum = 0.99
     
     if args.lr is None: INFO['actual_lr'] = args.lr = args.blr * args.total_batch_size / 256
     else:   INFO['base_lr'] = args.blr = args.lr * 256 / args.total_batch_size

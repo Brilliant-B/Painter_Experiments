@@ -264,8 +264,9 @@ def prepare_model(arch='painter_vit_large_patch16_input896x448_win_dec64_8glb_sl
 
 def get_contexts(args, dataset_name):
     random.seed(args.seed)
+    max_nc = 10
     context_set = DatasetTest(args.dataset_root, TRAIN_JSON_BANK[dataset_name], args.img_size, None)
-    idce = random.choices(range(len(context_set)), k=6)
+    idce = random.choices(range(len(context_set)), k=max_nc)
     c_query, c_target = [], []
     for idx in idce:
         img, _, tgt, _, _ = context_set[idx]
@@ -273,7 +274,7 @@ def get_contexts(args, dataset_name):
         c_target.append(tgt)
     c_query = torch.stack(c_query, dim=0).repeat(args.batch_size, 1, 1, 1, 1)
     c_target = torch.stack(c_target, dim=0).repeat(args.batch_size, 1, 1, 1, 1)
-    assert c_query.shape == c_target.shape == (args.batch_size, 6, args.img_size, args.img_size, 3)
+    assert c_query.shape == c_target.shape == (args.batch_size, max_nc, args.img_size, args.img_size, 3)
     return c_query, c_target
 
 
@@ -492,22 +493,23 @@ if __name__ == '__main__':
     args.context_base = {dataset_name: list(get_contexts(args, dataset_name)) for dataset_name in dataset_names}
     
     print("Main Test Started:")
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_T2/Joint|1|12:6|64/checkpoint-1-16195.pth"
-    INFO['use_cache'] = args.use_cache = True
-    INFO['joint_train'] = args.joint_datasets = True
-    INFO['train_mask_ratio'] = args.train_mask_ratio = 1.0
-    INFO['train_batch_size'] = args.train_batch_size = 2048
-    INFO['train_num_contexts'] = args.train_nc = 1
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_T2/Joint|1|16|12|6/checkpoint-0-8097.pth"
+    main_settings = args.ckpt_path.split('/')[2].split('|')
+    INFO['joint_train'] = args.joint_datasets = main_settings[0] == 'Joint'
+    INFO['train_num_contexts'] = args.train_nc = int(main_settings[1])
+    INFO['num_registers'] = args.num_registers = int(main_settings[2])
+    INFO['collect_depth'] = args.collect_depth = int(main_settings[3])
+    INFO['extract_layers'] = args.extract_layers = int(main_settings[4])
     
-    INFO['num_contexts'] = args.nci = args.nc = 1
-    INFO['extract_layers'] = args.extract_layers = 6
-    INFO['collect_depth'] = args.collect_depth = 12
-    INFO['num_registers'] = args.num_registers = 64
+    INFO['num_contexts_test'] = args.nci = args.nc = args.train_nc
+    INFO['train_batch_size'] = args.train_batch_size = 2048
+    INFO['train_mask_ratio'] = args.train_mask_ratio = 1.0
     INFO['init_layerscale'] = args.init_layerscale = 0.1
+    INFO['use_cache'] = args.use_cache = True
     
     mix_data = "Joint" if args.joint_datasets else "Seperate"
     args.output_dir = os.path.join(args.output_dir, \
-        f"{mix_data}|{args.nci}|{args.collect_depth}:{args.extract_layers}|{args.num_registers}")
+        f"{mix_data}|{args.nc}|{args.num_registers}|{args.collect_depth}|{args.extract_layers}")
     if ddp_utils.get_rank() == 0:   os.makedirs(args.output_dir, exist_ok=True)
     with open(os.path.join(args.output_dir, "metrics.txt"), 'a') as f:
         print(json.dumps(INFO, sort_keys=False, indent=4))

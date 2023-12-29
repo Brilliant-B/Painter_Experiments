@@ -78,6 +78,8 @@ def train_one_epoch(model: torch.nn.Module,
                                     update_grad=(data_iter_step + 1) % accum_iter == 0)
             if (data_iter_step + 1) % accum_iter == 0:
                 optimizer.zero_grad()
+                if hasattr(model_without_ddp, 'c_momentum'):
+                    model_without_ddp.c_blocks_momentum_update()
             loss_scale_value = loss_scaler.state_dict()["scale"]
 
         torch.cuda.synchronize()
