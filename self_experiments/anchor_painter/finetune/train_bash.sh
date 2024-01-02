@@ -24,13 +24,21 @@ python -m torch.distributed.launch --nproc_per_node=${N_GPUS} --master_port=1235
     --json_path \
     $DATA_PATH/nyu_depth_v2/nyuv2_sync_image_depth.json \
     $DATA_PATH/ade20k/ade20k_training_image_semantic.json \
+    $DATA_PATH/coco/pano_ca_inst/coco_train_image_panoptic_inst.json \
     $DATA_PATH/coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json \
     $DATA_PATH/coco_pose/coco_pose_256x192_train.json \
+    $DATA_PATH/denoise/denoise_ssid_train.json \
+    $DATA_PATH/derain/derain_train.json \
+    $DATA_PATH/light_enhance/enhance_lol_train.json \
     --val_json_path \
     $DATA_PATH/nyu_depth_v2/nyuv2_test_image_depth.json \
     $DATA_PATH/ade20k/ade20k_validation_image_semantic.json \
+    $DATA_PATH/coco/pano_ca_inst/coco_val_image_panoptic_inst.json \
     $DATA_PATH/coco/pano_sem_seg/coco_val2017_image_panoptic_sem_seg.json \
     $DATA_PATH/coco_pose/coco_pose_256x192_val.json \
+    $DATA_PATH/denoise/denoise_ssid_val.json \
+    $DATA_PATH/derain/derain_test_rain100h.json \
+    $DATA_PATH/light_enhance/enhance_lol_val.json \
     --output_dir workbench/train_anchor_painter \
     --log_dir workbench/train_anchor_painter/logs \
     --finetune pretrained/pretrained_mae_vit_large/mae_pretrain_vit_large.pth \
@@ -42,18 +50,18 @@ python -m torch.distributed.launch --nproc_per_node=${N_GPUS} --master_port=1235
     
     # $DATA_PATH/nyu_depth_v2/nyuv2_sync_image_depth.json \
     # $DATA_PATH/ade20k/ade20k_training_image_semantic.json \
+    # $DATA_PATH/coco/pano_ca_inst/coco_train_image_panoptic_inst.json \
     # $DATA_PATH/coco/pano_sem_seg/coco_train2017_image_panoptic_sem_seg.json \
+    # $DATA_PATH/coco_pose/coco_pose_256x192_train.json \
     # $DATA_PATH/denoise/denoise_ssid_train.json \
     # $DATA_PATH/derain/derain_train.json \
     # $DATA_PATH/light_enhance/enhance_lol_train.json \
-    # $DATA_PATH/coco/pano_ca_inst/coco_train_image_panoptic_inst.json \
-    # $DATA_PATH/coco_pose/coco_pose_256x192_train.json \
     
     # $DATA_PATH/nyu_depth_v2/nyuv2_test_image_depth.json \
     # $DATA_PATH/ade20k/ade20k_validation_image_semantic.json \
+    # $DATA_PATH/coco/pano_ca_inst/coco_val_image_panoptic_inst.json \
     # $DATA_PATH/coco/pano_sem_seg/coco_val2017_image_panoptic_sem_seg.json \
+    # $DATA_PATH/coco_pose/coco_pose_256x192_val.json \
     # $DATA_PATH/denoise/denoise_ssid_val.json \
     # $DATA_PATH/derain/derain_test_rain100h.json \
     # $DATA_PATH/light_enhance/enhance_lol_val.json \
-    # $DATA_PATH/coco/pano_ca_inst/coco_val_image_panoptic_inst.json \
-    # $DATA_PATH/coco_pose/coco_pose_256x192_val.json \

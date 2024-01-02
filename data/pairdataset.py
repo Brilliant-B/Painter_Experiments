@@ -55,11 +55,12 @@ class PairDataset(VisionDataset):
         self.weights = []
         type_weight_list = [0.1, 0.2, 0.15, 0.25, 0.2, 0.15, 0.05, 0.05]
         for idx, json_path in enumerate(json_path_list):
-            cur_pairs = json.load(open(json_path))
-            self.pairs.extend(cur_pairs)
-            cur_num = len(cur_pairs)
-            self.weights.extend([type_weight_list[idx] * 1./cur_num]*cur_num)
-            # print(json_path, type_weight_list[idx])
+            if os.path.isfile(json_path):
+                cur_pairs = json.load(open(json_path))
+                self.pairs.extend(cur_pairs)
+                cur_num = len(cur_pairs)
+                self.weights.extend([type_weight_list[idx] * 1./cur_num]*cur_num)
+                # print(json_path, type_weight_list[idx])
         self.use_two_pairs = use_two_pairs
         if self.use_two_pairs:
             self.pair_type_dict = {}

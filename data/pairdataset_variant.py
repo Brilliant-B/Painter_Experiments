@@ -40,7 +40,7 @@ class PairDataset(VisionDataset):
         self.is_train = is_train
         self.pairs = []
         self.weights = []
-        type_weight_list = [0.2, 0.3, 0.15, 0.05, 0.1, 0.15, 0.15, 0.05]
+        type_weight_list = [0.1, 0.2, 0.15, 0.25, 0.2, 0.15, 0.05, 0.05]
         for idx, json_path in enumerate(json_path_list):
             cur_pairs = json.load(open(json_path))
             self.pairs.extend(cur_pairs)
