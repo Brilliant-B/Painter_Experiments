@@ -2,7 +2,7 @@
 
 NUM_GPUS=4
 DATA_PATH=datasets
-name=T3
+name=T2
 python -m torch.distributed.launch --nproc_per_node=${NUM_GPUS} --master_port=12358 \
 	--use_env self_experiments/new_idea/finetune/multi_finetune_portal.py \
     --n_gpu $NUM_GPUS \

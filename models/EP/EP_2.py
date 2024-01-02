@@ -12,56 +12,12 @@ from timm.models.vision_transformer import Mlp
 from util.vitdet_utils import (
     PatchEmbed,
     add_decomposed_rel_pos,
+    add_decomposed_rel_pos_ep,
     get_abs_pos,
     window_partition,
     window_unpartition,
     LayerNorm2D,
 )
-
-
-class Class_Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-        self.q = nn.Linear(dim, dim, bias=qkv_bias)
-        self.k = nn.Linear(dim, dim, bias=qkv_bias)
-        self.v = nn.Linear(dim, dim, bias=qkv_bias)
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-    def forward(self, cls, pch):
-        B, Hp, Wp, C = cls.shape
-        x = torch.cat([cls, pch], dim=1)
-        q = self.q(cls).reshape(B, Hp * Wp, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3) * self.scale
-        k = self.k(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3)
-        v = self.v(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(2, 0, 1, 3)
-        attn = q @ k.transpose(-2, -1)
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        x_cls = (attn @ v).view(self.num_heads, B, Hp, Wp, -1).permute(1, 2, 3, 0, 4).reshape(B, Hp, Wp, -1)
-        x_cls = self.proj(x_cls)
-        x_cls = self.proj_drop(x_cls)
-        return x_cls
-
-
-
-class CA_Block(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
-        super().__init__()
-        self.norm1 = norm_layer(dim)
-        self.attn = Class_Attention(dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
-        self.norm2 = norm_layer(dim)
-        self.mlp = Mlp(in_features=dim, hidden_features=int(dim*mlp_ratio), act_layer=act_layer, drop=drop)
-    
-    def forward(self, cls, pch):
-        cls = cls + self.drop_path(self.attn(self.norm1(cls), self.norm1(pch)))
-        cls = cls + self.drop_path(self.mlp(self.norm2(cls)))
-        return cls
 
 
 
@@ -93,6 +49,7 @@ class Attention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.proj = nn.Linear(dim, dim)
         self.use_rel_pos = use_rel_pos
+        self.input_size = input_size
         if self.use_rel_pos:
             # initialize relative positional embeddings
             self.rel_pos_h = nn.Parameter(torch.zeros(2 * input_size[0] - 1, head_dim))
@@ -111,7 +68,11 @@ class Attention(nn.Module):
         if cait:    q = q[:, -W*W:]
         attn = (q * self.scale) @ k.transpose(-2, -1)
         if self.use_rel_pos:
-            attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, (Ht, W), (H, W))
+            if cait:
+                pass
+                # attn = add_decomposed_rel_pos_ep(attn, q, self.rel_pos_h, self.rel_pos_w, (Ht, W), (H, W))
+            else:
+                attn = add_decomposed_rel_pos(attn, q, self.rel_pos_h, self.rel_pos_w, self.input_size, self.input_size)
         attn = attn.softmax(dim=-1)
         x = attn @ v
         x = x.view(self.num_heads, B, Ht, W, -1)
@@ -196,6 +157,8 @@ class Block(nn.Module):
         rel_pos_zero_init=True,
         window_size=0,
         use_residual_block=False,
+        use_cait=False,
+        ls_init=1e-4, # 1e-5
         input_size=None,
     ):
         """
@@ -240,24 +203,44 @@ class Block(nn.Module):
                 norm="LN",
                 act_layer=act_layer,
             )
+        self.use_cait = use_cait
+        self.ls_init = ls_init
+        self.gamma_1 = nn.Parameter(ls_init * torch.ones((dim)), requires_grad=True)
+        self.gamma_2 = nn.Parameter(ls_init * torch.ones((dim)), requires_grad=True)
 
-    def forward(self, x, use_cait=False):
-        ori_shape = list(x.shape)
-        x = x.reshape(-1, *ori_shape[-3:])
-        shortcut = x[:, -ori_shape[-2]:] if use_cait else x
-        x = self.norm1(x)
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'gamma_1', 'gamma_2'}
+    
+    def attn_window(self, x):
+        # Window partition
         if self.window_size > 0:
             x, pad_hw = window_partition(x, self.window_size)
-        x = self.attn(x, cait=use_cait)
+        x = self.attn(x)
+        # Reverse window partition
         if self.window_size > 0:
             x = window_unpartition(x, self.window_size, pad_hw, self.input_size)
-        x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
-        if self.use_residual_block:
-            x = self.residual(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
-        if use_cait:    ori_shape[-3] = ori_shape[-2]
+        return x
+
+    def forward(self, x):
+        ori_shape = list(x.shape)
+        x = x.reshape(-1, *ori_shape[-3:])
+        shortcut = x[:, -ori_shape[-2]:] if self.use_cait else x
+        x = self.norm1(x)
+        if self.use_cait:    x = self.attn(x, cait=True)
+        else:   x = self.attn_window(x)
+        if self.use_cait:
+            x = shortcut + self.drop_path(self.gamma_1 * x)
+            reg = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))
+        else:
+            x = shortcut + self.drop_path(x)
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            if self.use_residual_block:
+                x = self.residual(x.permute(0, 3, 1, 2)).permute(0, 2, 3, 1)
+        if self.use_cait:    ori_shape[-3] = ori_shape[-2]
         x = x.reshape(ori_shape)
         return x
+
 
 
 
@@ -276,13 +259,11 @@ class Extractor_Processor(nn.Module):
             datasets_lw=None,
             n_contexts=3,
             ni_contexts=1,
-            e_layer=3,
-            g_layer=18,
-            use_pc=True,
-            insert_pc=False,
-            pc_skip=False,
+            extractor_layers=None,
+            global_depth=None,
             momentum=0.9,
             use_cpooling=True,
+            layerscale_init=1e-4,
             is_infer=False,
             use_cache=True,
             
@@ -326,12 +307,10 @@ class Extractor_Processor(nn.Module):
         self.encoder_sampling = set([5, 11, 17, 23])
         self.nc = n_contexts
         self.nci = ni_contexts
-        self.e_layer = e_layer
-        self.g_layer = g_layer
-        self.use_pc = use_pc
-        self.insert_pc = insert_pc
-        self.pc_skip = pc_skip
-        need_cache = list(range(e_layer)) + [g_layer]
+        self.e_layers = extractor_layers
+        self.g_depth = global_depth
+        self.layerscale_init = layerscale_init
+        need_cache = extractor_layers + [global_depth]
         self.momentum = momentum
         self.use_cpooling = use_cpooling
         assert merge_layer <= min(self.encoder_sampling)
@@ -368,12 +347,8 @@ class Extractor_Processor(nn.Module):
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, self.depth)]
         
         self.c_blocks = nn.ModuleList()
-        self.blocks = nn.ModuleList()
-        for i in range(self.g_layer):
-            n = 1 if use_cpooling else self.nc
-            input_size = ((n + 1) * self.ori_window_size[0], self.ori_window_size[1]) \
-                if i in range(e_layer) else self.ori_window_size
-            windowsize = 0 if i in range(e_layer) or i not in window_block_indexes else window_size
+        for i in range(self.g_depth):
+            windowsize = 0 if i in extractor_layers or i not in window_block_indexes else window_size
             c_block = Block(
                 dim=embed_dim,
                 num_heads=num_heads,
@@ -386,8 +361,20 @@ class Extractor_Processor(nn.Module):
                 rel_pos_zero_init=rel_pos_zero_init,
                 window_size=windowsize,
                 use_residual_block=i in residual_block_indexes,
+                use_cait=False,
+                ls_init=layerscale_init,
                 input_size=self.ori_window_size,
             )
+            if use_act_checkpoint:
+                c_block = checkpoint_wrapper(c_block)
+            self.c_blocks.append(c_block)
+        
+        self.blocks = nn.ModuleList()
+        for i in range(self.depth):
+            inputsize = (2 * self.ori_window_size[0], self.ori_window_size[1]) if i >= self.g_depth else self.ori_window_size \
+                if i not in self.e_layers else (2 * self.ori_window_size[0], self.ori_window_size[1]) \
+                if self.use_cpooling else (self.nc * self.ori_window_size[0], self.ori_window_size[1])
+            windowsize = 0 if i in extractor_layers or i not in window_block_indexes else window_size
             q_block = Block(
                 dim=embed_dim,
                 num_heads=num_heads,
@@ -400,67 +387,18 @@ class Extractor_Processor(nn.Module):
                 rel_pos_zero_init=rel_pos_zero_init,
                 window_size=windowsize,
                 use_residual_block=i in residual_block_indexes,
-                input_size=input_size,
+                use_cait=i in extractor_layers,
+                ls_init=layerscale_init,
+                input_size=inputsize,
             )
             if use_act_checkpoint:
-                c_block = checkpoint_wrapper(c_block)
-                q_block = checkpoint_wrapper(q_block)
-            self.c_blocks.append(c_block)
+                q_block = checkpoint_wrapper(q_block)  
             self.blocks.append(q_block)
-        
-        for i in range(self.g_layer, self.depth):
-            input_size = ((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1]) \
-                if use_pc and not insert_pc and i < g_layer + 1 else (2 * self.ori_window_size[0], self.ori_window_size[1])
-            windowsize = 0 if i < g_layer + 1 or i not in window_block_indexes else window_size
-            block = Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                use_rel_pos=use_rel_pos,
-                rel_pos_zero_init=rel_pos_zero_init,
-                window_size=windowsize,
-                use_residual_block=i in residual_block_indexes,
-                input_size=input_size,
-            )
-            if use_act_checkpoint:
-                block = checkpoint_wrapper(block)
-            self.blocks.append(block)
-        
-        if use_pc and insert_pc:
-            self.pc_block = Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-                norm_layer=norm_layer,
-                act_layer=act_layer,
-                use_rel_pos=use_rel_pos,
-                rel_pos_zero_init=rel_pos_zero_init,
-                window_size=0,
-                use_residual_block=i in residual_block_indexes,
-                input_size=((self.nc + 1) * self.ori_window_size[0], self.ori_window_size[1]),
-            )
-            # self.pc_block = CA_Block(
-            #     dim=embed_dim,
-            #     num_heads=num_heads,
-            #     mlp_ratio=mlp_ratio,
-            #     qkv_bias=qkv_bias,
-            #     drop_path=0.,
-            #     norm_layer=norm_layer,
-            #     act_layer=act_layer,
-            # )
-            if use_act_checkpoint:
-                pc_block = checkpoint_wrapper(pc_block)
 
         self._out_feature_channels = {out_feature: embed_dim}
         self._out_feature_strides = {out_feature: patch_size}
         self._out_features = [out_feature]
-    
+
         if self.pos_embed is not None:
             trunc_normal_(self.pos_embed, std=0.02)
         self.norm = norm_layer(embed_dim)
@@ -494,7 +432,7 @@ class Extractor_Processor(nn.Module):
     
     @torch.no_grad()
     def init_cq_duplicate(self):
-        for (name_c, param_c), param_q in zip(self.c_blocks.named_parameters(), self.blocks[:self.g_layer].parameters()):
+        for (name_c, param_c), param_q in zip(self.c_blocks.named_parameters(), self.blocks.parameters()):
             tmp_q = param_q.data
             if "attn.rel_pos_h" in name_c:
                 tmp_q = F.interpolate(tmp_q.permute(1, 0).unsqueeze(0), size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
@@ -503,12 +441,12 @@ class Extractor_Processor(nn.Module):
     
     @torch.no_grad()
     def c_blocks_momentum_update(self):
-        for (name_c, param_c), param_q in zip(self.c_blocks.named_parameters(), self.blocks[:self.g_layer].parameters()):
+        for (name_c, param_c), param_q in zip(self.c_blocks.named_parameters(), self.blocks.parameters()):
             tmp_q = param_q.data
             if "attn.rel_pos_h" in name_c:
                 tmp_q = F.interpolate(tmp_q.permute(1, 0).unsqueeze(0), size=(0 * 56 + 55), mode='linear')[0].permute(1, 0)
             param_c.data = param_c.data * self.momentum + tmp_q * (1. - self.momentum)
-
+    
     @torch.no_grad()
     def queue_sample_update(self, type, idx, c):
         c_all = []
@@ -530,19 +468,15 @@ class Extractor_Processor(nn.Module):
         return c_all  # [B, nc, Hp, Wp, C] / [B, 2, nc, Hp, Wp, C]
     
     @torch.no_grad()
-    def lqueue_sample_update(self, type, idx, c):
-        cl_all = []
-        for i in range(len(type)):
-            cl = self.l_queues[type[i]][idx]
-            cl_all.append(cl.cuda())
-        cl_all = torch.stack(cl_all, dim=0)
-        cl_all = cl_all.mean(-4)
-        for i in range(len(type)):
-            ptr = self.ptrs[type[i]]
-            self.l_queues[type[i]][idx][ptr:ptr + self.nci] = c[i]
-            self.ptrs[type[i]] = (ptr + self.nci) % self.nc     
-        return cl_all  # [B, Hp, Wp, C]
-
+    def cache_sample(self, B, idx):
+        c_all = self.cache[idx].cuda()
+        c_all = torch.stack([c_all for _ in range(B)], dim=0)    
+        return c_all  # [B, nc, Hp, Wp, C] / [B, 2, nc, Hp, Wp, C]
+    
+    @torch.no_grad()
+    def cache_update(self, idx, c):
+        self.cache[idx] = c[0]
+    
     def forward_encoder(self, type, c_query, c_target, query, target, mask):
         x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
         t = self.patch_embed(target.permute(0, 3, 1, 2).contiguous()) + self.segment_token_y
@@ -565,184 +499,30 @@ class Extractor_Processor(nn.Module):
         
         latents = []
         for idx in range(self.depth):
-            if idx < self.e_layer:
+            if idx in self.e_layers:
                 c_all = self.queue_sample_update(type, idx, c)
-                if self.use_cpooling:   c_all = torch.mean(c_all, -4)
-                else:   c_all = torch.flatten(c_all, -4, -3)
-                x = torch.cat([c_all, x], dim=-3)
-                x = self.blocks[idx](x, use_cait=True)
-                c = self.c_blocks[idx](c)
-            elif idx < self.g_layer:
+                if self.use_cpooling:   cc = torch.mean(c_all, -4)
+                else:   cc = torch.flatten(c_all, -4, -3)
+                x = torch.cat([cc, x], dim=-3)
                 x = self.blocks[idx](x)
                 c = self.c_blocks[idx](c)
-            elif idx == self.g_layer:
-                c = self.queue_sample_update(type, idx, c)
-                if self.use_pc:
-                    c_avg = torch.mean(c, -4)
-                    c_all = torch.flatten(c, -4, -3)
-                    c_avg = torch.cat([c_all, c_avg], dim=-3)
-                    if self.pc_skip:
-                        c_avg = self.pc_block(c_avg, use_cait=True)
-                        # c_avg = self.pc_block(c_avg, c_all)
-                        x = torch.cat([c_avg, x], dim=-3)
-                        if self.insert_pc:
-                            x = self.blocks[idx](x)
-                    else:
-                        x = torch.cat([c_all, x], dim=-3)
-                        x = torch.cat([c_avg, x], dim=0)
-                        # x = torch.cat([c_avg, x], dim=0)
-                        # c_all = c_all.repeat(2, 1, 1, 1)
-                        if self.insert_pc:
-                            x = self.pc_block(x, use_cait=True)
-                            # x = self.pc_block(x, c_all)
-                            x = torch.cat(x.chunk(2, dim=0), dim=-3)
-                            x = self.blocks[idx](x)
-                        else:
-                            x = self.blocks[idx](x, use_cait=True)
-                            x = torch.cat(x.chunk(2, dim=0), dim=-3)
-                else:
-                    c = torch.mean(c, -4)
-                    x = torch.cat([c, x], dim=-3)
-                    x = self.blocks[idx](x)
+            elif idx >= self.g_depth:
+                if idx == self.g_depth:
+                    c_all = self.queue_sample_update(type, idx, c)
+                    cc = torch.mean(c_all, -4)
+                    x = torch.cat([cc, x], dim=-3)
+                x = self.blocks[idx](x)
             else:
                 x = self.blocks[idx](x)
+                c = self.c_blocks[idx](c)
             if idx + 1 == self.merge_layer:
                 x = x.mean(1)
                 c = c.mean(1)
             if idx in self.encoder_sampling:
-                if idx > self.g_layer:    
-                    latent = self.norm(x)
-                else:
-                    c_latent = self.lqueue_sample_update(type, idx, c)
-                    latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
-                latents.append(latent)
-                
-        latents = torch.cat(latents, dim=-1)
-        assert latents.shape == (B, 2 * Hp, Wp, 4 * C)
-        return latents
-    
-    @torch.no_grad()
-    def cache_sample(self, B, idx):
-        c_all = self.cache[idx].cuda()
-        c_all = torch.stack([c_all for _ in range(B)], dim=0)    
-        return c_all  # [B, nc, Hp, Wp, C] / [B, 2, nc, Hp, Wp, C]
-    
-    @torch.no_grad()
-    def cache_update(self, idx, c):
-        self.cache[idx] = c[0]
-    
-    @torch.no_grad()
-    def lcache_sample(self, B, idx):
-        l_all = self.l_cache[idx].cuda()
-        l_all = l_all.repeat(B, 1, 1, 1)
-        return l_all # [B, Hp, Wp, C]
-    
-    @torch.no_grad()
-    def lcache_update(self, idx, c):
-        c = torch.mean(c, -4)
-        self.l_cache[idx] = c[0]
-        return c
-    
-    def forward_encoder_infer(self, c_query, c_target, query, target, mask):
-        x = self.patch_embed(query.permute(0, 3, 1, 2).contiguous())
-        t = self.patch_embed(target.permute(0, 3, 1, 2).contiguous())
-        B, Hp, Wp, C = x.shape
-        assert mask.shape[1:] == self.ori_window_size == (Hp, Wp) and self.mask_token.shape[-1] == C
-        mask_token = self.mask_token.expand(B, Hp, Wp, -1)
-        mask = mask.unsqueeze(-1).type_as(mask_token) # (B, Hp, Wp, 1)
-        t = t * (1 - mask) + mask_token * mask # (B, Hp, Hp, C)
-        x = x + self.segment_token_x
-        t = t + self.segment_token_y
-        if self.pos_embed is not None:
-            abs_pos = get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-            x = x + abs_pos
-            t = t + abs_pos
-        x = torch.stack([x, t], dim=1) # (B, 2, Hp, Wp, C)
-        
-        need_c = not self.use_cache or not self.cache_init
-        if need_c:
-            c, co = c_query.flatten(0, 1), c_target.flatten(0, 1)
-            c = self.patch_embed(c.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
-            co = self.patch_embed(co.permute(0, 3, 1, 2).contiguous()) + self.segment_token_x
-            c, co = c.reshape(B, -1, Hp, Wp, C), co.reshape(B, -1, Hp, Wp, C)
-            if self.pos_embed is not None:
-                abs_pos = get_abs_pos(self.pos_embed, self.pretrain_use_cls_token, (Hp, Wp))
-                c = c + abs_pos
-                co = co + abs_pos
-            c = torch.stack([c, co], dim=1) # (B, 2, nci, Hp, Wp, C)
-
-        latents = []
-        for idx in range(self.depth):                
-            if idx < self.e_layer:
-                if need_c:  self.cache_update(idx, c)
-                else:   c = self.cache_sample(B, idx)
-                if self.use_cpooling:   cc = torch.mean(c, -4)
-                else:   cc = torch.flatten(c, -4, -3)
-                x = torch.cat([cc, x], dim=-3)
-                x = self.blocks[idx](x, use_cait=True)
-                if need_c:  c = self.c_blocks[idx](c)
-            elif idx < self.g_layer:
-                x = self.blocks[idx](x)
-                if need_c:  c = self.c_blocks[idx](c)
-            elif idx == self.g_layer:
-                if self.use_pc:
-                    if self.pc_skip:
-                        if need_c:
-                            c_avg = torch.mean(c, -4)
-                            c_all = torch.flatten(c, -4, -3)
-                            c_avg = torch.cat([c_all, c_avg], dim=-3)
-                            if self.insert_pc:
-                                c_avg = self.pc_block(c_avg, use_cait=True)
-                                # c_avg = self.pc_block(c_avg, c_all)
-                            else:
-                                c_avg = self.blocks[idx](c_avg, use_cait=True)
-                            self.cache_update(idx, c_avg)
-                        else:
-                            c_avg = self.cache_sample(B, idx)
-                        x = torch.cat([c_avg, x], dim=-3)
-                        if self.insert_pc:
-                            x = self.blocks[idx](x)
-                    else:
-                        if need_c:  self.cache_update(idx, c)
-                        else:   c = self.cache_sample(B, idx)
-                        c_avg = torch.mean(c, -4)
-                        c_all = torch.flatten(c, -4, -3)
-                        c_avg = torch.cat([c_all, c_avg], dim=-3)
-                        x = torch.cat([c_all, x], dim=-3)
-                        x = torch.cat([c_avg, x], dim=0)
-                        # x = torch.cat([c_avg, x], dim=0)
-                        # c_all = c_all.repeat(2, 1, 1, 1)
-                        if self.insert_pc:
-                            x = self.pc_block(x, use_cait=True)
-                            # x = self.pc_block(x, c_all)
-                            x = torch.cat(x.chunk(2, dim=0), dim=-3)
-                            x = self.blocks[idx](x)
-                        else:
-                            x = self.blocks[idx](x, use_cait=True)
-                            x = torch.cat(x.chunk(2, dim=0), dim=-3)
-                else:
-                    if need_c:  self.cache_update(idx, c)
-                    else:   c = self.cache_sample(B, idx)
-                    cc = torch.mean(c, -4)
-                    x = torch.cat([cc, x], dim=-3)
-                    x = self.blocks[idx](x)
-            else:
-                x = self.blocks[idx](x)
-            if idx + 1 == self.merge_layer:
-                x = x.mean(1)
-                if need_c:  c = c.mean(1)
-            if idx in self.encoder_sampling:
-                if idx > self.g_layer:
-                    latent = self.norm(x)
-                else:
-                    if need_c:  c_latent = self.lcache_update(idx, c)
-                    else:   c_latent = self.lcache_sample(B, idx)
-                    latent = self.norm(torch.cat([c_latent, x], dim=-3)) # (B, 2 * Hp, Wp, C)
-                latents.append(latent)
+                latents.append(self.norm(x[:, -Hp:]))
         
         latents = torch.cat(latents, dim=-1)
-        assert latents.shape == (B, 2 * Hp, Wp, 4 * C)
-        if self.use_cache and not self.cache_init:  self.cache_init = True
+        assert latents.shape == (B, Hp, Wp, 4 * C)
         return latents
 
     def forward_decoder(self, latent):
@@ -751,29 +531,30 @@ class Extractor_Processor(nn.Module):
         B, Hl, Wl, _ = x.shape
         x = x.reshape(B, Hl, Wl, ps, ps, self.decoder_embed_dim)
         x = torch.einsum('bhwpqc->bchpwq', x)
-        x = x.reshape(B, self.decoder_embed_dim, Hl * ps, Wl * ps) # (B, D, 2 * Hd, Wd)
+        x = x.reshape(B, self.decoder_embed_dim, Hl * ps, Wl * ps) # (B, D, Hd, Wd)
         pred = self.decoder_pred(x)
-        pred = pred.chunk(2, dim=2)[1] 
         pred = pred.permute(0, 2, 3, 1).contiguous() # pred: (B, H, W, 3)
         assert pred.shape == (B, *self.img_size, 3)
         return pred
 
-    def forward_loss(self, type, pred, target, mask, valid):
+    def get_valid_image_mask(self, c_target, target, mask, valid):
         b, h, w, p = mask.shape[0], *self.ori_window_size, self.patch_size
         image_mask = mask.unsqueeze(-1).repeat(1, 1, 1, p ** 2 * 3)
         image_mask = image_mask.reshape(b, h, w, p, p, 3)
         image_mask = torch.einsum('bhwpqc->bhpwqc', image_mask).contiguous()
         image_mask = image_mask.reshape(b, h * p, w * p, 3)
         assert image_mask.shape[1:-1] == self.img_size
-        
         imagenet_mean=torch.tensor([0.485, 0.456, 0.406]).to(target.device)[None, None, None, :]
         imagenet_std=torch.tensor([0.229, 0.224, 0.225]).to(target.device)[None, None, None, :]
-        inds_ign = ((target * imagenet_std + imagenet_mean) * (1 - 1. * image_mask)).sum((1, 2, 3)) < 100 * 3
-        # image_mask: (B, H, W, 3); valid: (B, H, W, 3)
-        if inds_ign.sum() > 0:
-            valid[inds_ign] = 0.
+        inds_ign = ((target * imagenet_std + imagenet_mean) * (1 - 1. * image_mask)).sum((1, 2, 3))
+        inds_ign = (inds_ign + (c_target.mean(1) * imagenet_std + imagenet_mean).sum((1, 2, 3))) < 100 * 3
+        # if inds_ign.sum() > 0:
+        #     valid[inds_ign] = 0.
         image_mask = image_mask * valid
-        
+        # image_mask: (B, H, W, 3); valid: (B, H, W, 3)
+        return image_mask
+
+    def forward_loss(self, type, pred, target, image_mask):
         if self.loss_func == "l1l2":
             loss = ((pred - target).abs() + (pred - target) ** 2.) * 0.5
         elif self.loss_func == "l1":
@@ -784,7 +565,7 @@ class Extractor_Processor(nn.Module):
             loss = F.smooth_l1_loss(pred, target, reduction="none", beta=0.01)
         
         if self.need_loss_cal:
-            for i in range(b):
+            for i in range(len(type)):
                 image_mask[i] = image_mask[i] * self.datasets_lw[type[i]]
         
         Loss = (loss * image_mask).sum() / (image_mask.sum() + 1e-2)  # mean loss on removed patches
@@ -796,13 +577,14 @@ class Extractor_Processor(nn.Module):
         # print(mask.shape) # (B, Hp, Wp)
         # print(valid.shape) # (B, H, W, 3)
         if self.is_infer:
-            latent = self.forward_encoder_infer(c_query, c_target, query, target, mask)
+            latent = self.forward_encoder(type, c_query, c_target, query, target, mask)
             pred = self.forward_decoder(latent)
             return pred
         else:
             latent = self.forward_encoder(type, c_query, c_target, query, target, mask)
             pred = self.forward_decoder(latent)
-            loss, image_mask = self.forward_loss(type, pred, target, mask, valid)
+            image_mask = self.get_valid_image_mask(c_target, target, mask, valid)
+            loss, image_mask = self.forward_loss(type, pred, target, image_mask)
             return loss, pred, image_mask
 
 

@@ -541,8 +541,8 @@ class T_Painter(nn.Module):
         imagenet_std=torch.tensor([0.229, 0.224, 0.225]).to(target.device)[None, None, None, :]
         inds_ign = ((target * imagenet_std + imagenet_mean) * (1 - 1. * image_mask)).sum((1, 2, 3))
         inds_ign = (inds_ign + (c_target.mean(1) * imagenet_std + imagenet_mean).sum((1, 2, 3))) < 100 * 3
-        if inds_ign.sum() > 0:
-            valid[inds_ign] = 0.
+        # if inds_ign.sum() > 0:
+        #     valid[inds_ign] = 0.
         image_mask = image_mask * valid
         # image_mask: (B, H, W, 3); valid: (B, H, W, 3)
         return image_mask

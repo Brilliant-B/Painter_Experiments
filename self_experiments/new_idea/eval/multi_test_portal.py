@@ -31,7 +31,7 @@ from util.pos_embed import (
     interpolate_rel_pos_embed,
 )
 
-import models.new_idea.T2 as painter_variant
+import models.new_idea.T3 as painter_variant
 
 
 def eval_coco_pano_semseg(metric_results, args, verbose=False):
@@ -493,7 +493,7 @@ if __name__ == '__main__':
     args.context_base = {dataset_name: list(get_contexts(args, dataset_name)) for dataset_name in dataset_names}
     
     print("Main Test Started:")
-    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_T2/Joint|1|16|12|6/checkpoint-0-8097.pth"
+    INFO['ckpt_path'] = args.ckpt_path = "workbench/train_T3/Joint|2|64|12|6/checkpoint-0-16195.pth"
     main_settings = args.ckpt_path.split('/')[2].split('|')
     INFO['joint_train'] = args.joint_datasets = main_settings[0] == 'Joint'
     INFO['train_num_contexts'] = args.train_nc = int(main_settings[1])

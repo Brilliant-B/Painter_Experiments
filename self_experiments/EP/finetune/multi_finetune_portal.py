@@ -38,7 +38,7 @@ from data.sampler import DistributedSamplerWrapper
 import wandb
 
 import models.EP.EP_2 as painter_variant
-from self_experiments.EP.finetune.engine_train import train_one_epoch
+from self_experiments.EP.finetune.engine_train import train_one_epoch, evaluate_pt
 
 TRAIN_JSON_BANK = {
     "ade20k_image2semantic": "ade20k/ade20k_training_image_semantic.json",
@@ -186,13 +186,24 @@ def prepare_model(args, prints=False):
         datasets_lw=args.datasets_weights,
         n_contexts=args.nc,
         ni_contexts=args.nci,
-        e_layer=args.e_layer,
-        g_layer=args.g_layer,
-        use_pc=args.use_pc,
-        insert_pc=args.insert_pc,
-        pc_skip=args.pc_skip,
+        extractor_layers=args.e_layers,
+        global_depth=args.g_depth,
         momentum=args.momentum,
         use_cpooling=args.use_cpooling,
+        layerscale_init=args.ls_init,
+        is_infer=False,
+    ).to("cuda")
+    
+    val_model = painter_variant.__dict__[args.model](
+        seed=args.seed,
+        datasets_lw=args.datasets_weights,
+        n_contexts=args.nc,
+        ni_contexts=args.nci,
+        extractor_layers=args.e_layers,
+        global_depth=args.g_depth,
+        momentum=args.momentum,
+        use_cpooling=args.use_cpooling,
+        layerscale_init=args.ls_init,
         is_infer=False,
     ).to("cuda")
     
@@ -235,7 +246,7 @@ def prepare_model(args, prints=False):
         for (name, param) in model.named_parameters():
             if key_match(name, freeze_list): param.requires_grad = False
             if prints:  print(name, param.requires_grad)
-    return model
+    return model, val_model
 
 
 
@@ -257,23 +268,25 @@ def prepare_data(args, global_rank, prints=False):
     transform_train_seccrop = pair_transforms.Compose([
             pair_transforms.RandomResizedCrop(args.img_size, scale=(args.min_random_scale, 1.0), ratio=(0.3, 0.7), interpolation=3),  # 3 is bicubic
             ])
-    # transform_val = pair_transforms.Compose([
-    #         pair_transforms.RandomResizedCrop(args.img_size[1], scale=(0.9999, 1.0), interpolation=3),  # 3 is bicubic
-    #         pair_transforms.ToTensor(),
-    #         pair_transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+    transform_val = pair_transforms.Compose([
+            pair_transforms.RandomResizedCrop(args.img_size[1], scale=(0.9999, 1.0), interpolation=3),  # 3 is bicubic
+            pair_transforms.ToTensor(),
+            pair_transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
     masked_position_generator = MaskingGenerator(
         args.window_size, num_masking_patches=args.num_mask_patches,
         max_num_patches=args.max_mask_patches_per_block,
         min_num_patches=args.min_mask_patches_per_block,
     )
-    dataset_train = PairDataset(args, args.json_path, transform=transform_train, transform2=transform_train2, 
+    dataset_train = PairDataset(True, args, args.json_path, transform=transform_train, transform2=transform_train2, 
                                 transform3=transform_train3, transform_seccrop=transform_train_seccrop, 
                                 masked_position_generator=masked_position_generator, global_rank=global_rank)
-    # dataset_val = PairDataset(args.data_path, args.val_json_path, args=args, transform=transform_val, transform2=None, transform3=None, 
-    #                           masked_position_generator=masked_position_generator, mask_ratio=1.)
-    if prints:  print(dataset_train)
-    return dataset_train
+    dataset_val = PairDataset(False, args, args.val_json_path, transform=transform_val, transform2=None, transform3=None, 
+                              masked_position_generator=masked_position_generator, global_rank=global_rank)
+    if prints:  
+        print(dataset_train)
+        print(dataset_val)
+    return dataset_train, dataset_val
 
 
 
@@ -323,7 +336,7 @@ def main(args, INFO):
         with open(Path(train_log_dir), 'a') as f:
             print(json.dumps(INFO, sort_keys=False, indent=4), file=f)
             print(json.dumps(INFO, sort_keys=False, indent=4))
-    model = prepare_model(args)
+    model, val_model = prepare_model(args)
     
     eff_batch_size = args.total_batch_size
     args.patch_size = patch_size = model.patch_size
@@ -359,7 +372,7 @@ def main(args, INFO):
     # define and augment the datasets
     if global_rank == 0:    print("[Prepare Data]")
     num_tasks = misc.get_world_size()
-    dataset_train = prepare_data(args, global_rank)
+    dataset_train, dataset_val = prepare_data(args, global_rank)
     num_samples_train = len(dataset_train)
     weights_train = dataset_train.weights
     sampler_train = torch.utils.data.WeightedRandomSampler(weights_train, num_samples_train, replacement=True)
@@ -372,7 +385,6 @@ def main(args, INFO):
         pin_memory=args.pin_mem,
         drop_last=True,
     )
-    '''
     sampler_val = torch.utils.data.DistributedSampler(dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=False)
     data_loader_val = torch.utils.data.DataLoader(
         dataset_val, sampler=sampler_val,
@@ -381,7 +393,6 @@ def main(args, INFO):
         pin_memory=args.pin_mem,
         drop_last=False,
     )
-    '''
     # load tools
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
@@ -399,7 +410,7 @@ def main(args, INFO):
     
     # initialize the model queue:
     if global_rank == 0:    print("[Initialize Model Queue]")
-    init_model_queue(args, model_without_ddp)
+    # init_model_queue(args, model_without_ddp)
     
     # show important hyper-parameters 
     if global_rank == 0: 
@@ -422,7 +433,17 @@ def main(args, INFO):
             global_rank=global_rank,
             args=args,
         )
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()}, 'epoch': epoch,}
+        with torch.no_grad():
+            val_model.load_state_dict(model.module.state_dict())
+        test_stats = evaluate_pt(
+            data_loader_val, val_model, device, 
+            epoch=epoch, global_rank=global_rank, args=args
+        )
+        log_stats = {
+            'epoch': epoch,
+            **{f'train_{k}': v for k, v in train_stats.items()}, 
+            **{f'test_{k}': v for k, v in test_stats.items()},
+        }
         if output_dir and misc.is_main_process():
             if log_writer is not None:
                 log_writer.flush()
@@ -477,17 +498,15 @@ if __name__ == '__main__':
     
     INFO['joint_train'] = args.joint_datasets = True
     INFO['finetune'] = args.finetune_code = 3
-    INFO['mask_ratio'] = args.mask_ratio = 0.99
+    INFO['mask_ratio'] = args.mask_ratio = 1.0
     
     INFO['num_contexts_used'] = args.nc = 1
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['extract_layer'] = args.e_layer = 0
-    INFO['global_layer'] = args.g_layer = 12
-    INFO['use_pc'] = args.use_pc = False
-    INFO['insert_pc'] = args.insert_pc = True
-    INFO['pc_skip'] = args.pc_skip = True
+    INFO['extractor_layers'] = args.e_layers = []
+    INFO['global_depth'] = args.g_depth = 12
     INFO['use_cpooling'] = args.use_cpooling = True
     INFO['momentum'] = args.momentum = 0.99
+    INFO['layerscale_init'] = args.ls_init = 1e-4
     
     main(args, INFO)
     

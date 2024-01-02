@@ -129,6 +129,42 @@ def add_decomposed_rel_pos_with_reg(attn, q, rel_pos_h, rel_pos_w, q_size, k_siz
 
 
 
+def add_decomposed_rel_pos_ep(attn, q, rel_pos_h, rel_pos_w, q_size, k_size):
+    """
+    Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
+    https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py   # noqa B950
+    Args:
+        attn (Tensor): attention map.
+        q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).
+        rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis.
+        rel_pos_w (Tensor): relative position embeddings (Lw, C) for width axis.
+        q_size (Tuple): spatial sequence size of query q with (q_h, q_w).
+        k_size (Tuple): spatial sequence size of key k with (k_h, k_w).
+
+    Returns:
+        attn (Tensor): attention map with added relative positional embeddings.
+    """
+    q_h, q_w = q_size
+    k_h, k_w = k_size
+    Rh = get_rel_pos(q_h, k_h, rel_pos_h)
+    Rw = get_rel_pos(q_w, k_w, rel_pos_w)
+    
+    nq, nk = q_h * q_w, k_h * k_w
+    
+    B, _, dim = q.shape
+    r_q = q[:, :nq].reshape(B, q_h, q_w, dim)
+    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)
+    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)
+    
+    for i in range(nk // nq):
+        attn[:, :nq, i*nq:(i+1)*nq] = (
+            attn[:, :nq, i*nq:(i+1)*nq].view(B, q_h, q_w, q_h, q_w) + rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]
+        ).view(B, q_h * q_w, q_h * q_w)
+
+    return attn
+
+
+
 def add_decomposed_rel_pos(attn, q, rel_pos_h, rel_pos_w, q_size, k_size):
     """
     Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.

@@ -76,6 +76,10 @@ def train_one_epoch(model: torch.nn.Module,
             grad_norm = loss_scaler(loss, optimizer, clip_grad=args.clip_grad,
                                     parameters=model.parameters(),
                                     update_grad=(data_iter_step + 1) % accum_iter == 0)
+            if global_rank == 0 and (math.isinf(loss_value) or math.isnan(loss_value)):
+                print(f'serial {data_iter_step} error: loss is {loss_value}')
+            if global_rank == 0 and grad_norm is not None and (math.isinf(grad_norm) or math.isnan(grad_norm)):
+                print(f"serial {data_iter_step} error: grad_norm is {grad_norm}")
             if (data_iter_step + 1) % accum_iter == 0:
                 optimizer.zero_grad()
                 if hasattr(model_without_ddp, 'c_momentum'):

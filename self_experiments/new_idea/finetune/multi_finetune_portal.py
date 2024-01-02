@@ -37,7 +37,7 @@ from util.masking_generator import MaskingGenerator
 from data.sampler import DistributedSamplerWrapper
 import wandb
 
-import models.new_idea.T3 as painter_variant
+import models.new_idea.T2 as painter_variant
 from self_experiments.new_idea.finetune.engine_train import train_one_epoch, evaluate_pt
 
 TRAIN_JSON_BANK = {
@@ -189,7 +189,6 @@ def prepare_model(args, prints=False):
         collect_depth=args.collect_depth,
         num_registers=args.num_registers,
         init_layerscale=args.init_layerscale,
-        c_momentum=args.c_momentum,
         is_infer=False,
     ).to("cuda")
     
@@ -202,7 +201,6 @@ def prepare_model(args, prints=False):
         collect_depth=args.collect_depth,
         num_registers=args.num_registers,
         init_layerscale=args.init_layerscale,
-        c_momentum=args.c_momentum,
         is_infer=False,
     ).to("cuda")
     
@@ -229,7 +227,7 @@ def prepare_model(args, prints=False):
         
         # load pre-trained model
         msg = model.load_state_dict(checkpoint, strict=False)
-        # model.init_copy_eblocks()
+        # model.init_copy_c_blocks()
         if prints:  print(msg)
         
     return model, val_model
@@ -425,13 +423,14 @@ if __name__ == '__main__':
     INFO = dict()
     INFO['seed'] = args.seed = 0
     INFO['datasets_weights'] = args.datasets_weights = datasets = {
-        "ade20k_image2semantic": 10,
-        "coco_image2panoptic_sem_seg": 10,
         "nyuv2_image2depth": 10,
+        "ade20k_image2semantic": 10,
+        # "coco_image2panoptic_ca_inst": 10,
+        "coco_image2panoptic_sem_seg": 10,
         "coco_image2pose": 10,
-        # "lol_image2enhance": 5,
-        # "derain_image2derain": 5,
-        # "ssid_image2denoise": 8,
+        "ssid_image2denoise": 10,
+        "derain_image2derain": 10,
+        "lol_image2enhance": 10,
     }
     json_path, val_json_path = [], []
     for dataset_name in datasets.keys():
@@ -441,7 +440,7 @@ if __name__ == '__main__':
     
     assert args.n_gpu == misc.get_world_size()
     INFO['epochs'] = args.epochs = 15
-    INFO['save_freq'] = args.save_itrs = 16195
+    INFO['save_freq'] = args.save_itrs = 23083 # 16195
     INFO['batch_size'] = args.batch_size = 4
     INFO['accum_iter'] = args.accum_iter = 128
     INFO['total_batch_size'] = args.total_batch_size = args.batch_size * args.accum_iter * args.n_gpu
@@ -453,14 +452,13 @@ if __name__ == '__main__':
     INFO['joint_train'] = args.joint_datasets = True
     INFO['mask_ratio'] = args.mask_ratio = 1.0
     INFO['num_contexts_input'] = args.nci = 1
-    INFO['num_contexts_used'] = args.nc = 3
+    INFO['num_contexts_used'] = args.nc = 1
     INFO['extract_layers'] = args.extract_layers = 6
     INFO['collect_depth'] = args.collect_depth = 12
     INFO['num_registers'] = args.num_registers = 64
     INFO['init_layerscale'] = args.init_layerscale = 0.1
-    INFO['c_momentum'] = args.c_momentum = 0.99
     
     if args.lr is None: INFO['actual_lr'] = args.lr = args.blr * args.total_batch_size / 256
     else:   INFO['base_lr'] = args.blr = args.lr * 256 / args.total_batch_size
     main(args, INFO)
-    
+    # NEW T3 !!!

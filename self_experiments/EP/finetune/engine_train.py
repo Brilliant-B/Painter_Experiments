@@ -123,22 +123,24 @@ def train_one_epoch(model: torch.nn.Module,
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
 
-'''
+
 @torch.no_grad()
 def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=None):
     metric_logger = misc.MetricLogger(delimiter="  ")
     header = 'Validation:'
     # switch to evaluation mode
     model.eval()
-    wandb_images = []
-    for prompts, query, target, mask, valid in metric_logger.log_every(data_loader, 50, header):
-        prompts = prompts.to(device, non_blocking=True)
+    if args.log_wandb:  wandb_images = []
+    
+    for type, c_query, c_target, query, target, mask, valid in metric_logger.log_every(data_loader, 20, header):
+        c_query = c_query.to(device, non_blocking=True)
+        c_target = c_target.to(device, non_blocking=True)
         query = query.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
         mask = mask.to(device, non_blocking=True)
         valid = valid.to(device, non_blocking=True)
         with torch.cuda.amp.autocast():
-            loss, pred, image_mask = model(prompts, query, target, mask, valid)
+            loss, pred, image_mask = model(type, c_query, c_target, query, target, mask, valid)
 
         metric_logger.update(loss=loss.item())
         if global_rank == 0 and args.log_wandb:
@@ -152,12 +154,16 @@ def evaluate_pt(data_loader, model, device, epoch=None, global_rank=None, args=N
             wandb_images.append(wandb.Image(frame.numpy(), caption="query; masked_label; pred; label"))
     
     # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print('Val loss {losses.global_avg:.3f}'.format(losses=metric_logger.loss))
+    metric_logger.synchronize_between_processes() 
     out = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
     if global_rank == 0 and args.log_wandb:
         wandb.log({**{f'test_{k}': v for k, v in out.items()},'epoch': epoch})
         if len(wandb_images) > 0:
             wandb.log({"Testing examples": wandb_images[::2][:20]})
+    if global_rank == 0:
+        print('Val loss {losses.global_avg:.3f}'.format(losses=metric_logger.loss))
+        print(f"Val Loss of the network = {out['loss']:.3f}")
+        with open(os.path.join(args.output_dir, "train_log.log"), 'a') as f:
+            print(f"Val Loss of the network = {out['loss']:.3f}", file=f)
+
     return out
-'''
